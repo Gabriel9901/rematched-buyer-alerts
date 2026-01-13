@@ -10,37 +10,12 @@ import { getServerSupabase } from '@/lib/supabase/client';
 import { buildSimpleSearchBody, Criteria } from '@/lib/typesense';
 import { typesenseMultiSearch } from '@/lib/typesense/client';
 import { BuyerRequirements } from '@/lib/gemini/qualify';
-import { BuyerCriteria } from '@/lib/supabase/types';
+import { BuyerCriteria, SystemPromptSetting, Buyer } from '@/lib/supabase/types';
 import { TypesenseHit } from '@/lib/typesense/types';
+import { buildPromptFromTemplate, DEFAULT_SYSTEM_PROMPT } from '@/lib/gemini/promptTemplate';
 
 // Gemini API URL
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent';
-
-// Qualification prompt template
-const QUALIFICATION_PROMPT = `You are a real estate matching assistant. Analyze how well this property listing matches the buyer's requirements.
-
-BUYER REQUIREMENTS:
-{requirements}
-
-PROPERTY LISTING:
-{listing}
-
-Evaluate the match and respond with ONLY a JSON object in this exact format:
-{
-  "score": <number 0-100>,
-  "explanation": "<brief 1-2 sentence summary>",
-  "highlights": ["<matching point 1>", "<matching point 2>"],
-  "concerns": ["<potential issue 1>", "<potential issue 2>"]
-}
-
-Scoring guide:
-- 90-100: Perfect match on all criteria
-- 70-89: Good match, minor deviations
-- 50-69: Partial match, some criteria not met
-- 30-49: Weak match, significant mismatches
-- 0-29: Poor match, most criteria not met
-
-Be strict but fair. Only include real highlights and concerns.`;
 
 interface SearchResults {
   totalSearches: number;
@@ -103,61 +78,17 @@ function toBuyerRequirements(dbCriteria: BuyerCriteria): BuyerRequirements {
     bathrooms: dbCriteria.bathrooms || undefined,
     minPriceAed: dbCriteria.min_price_aed || undefined,
     maxPriceAed: dbCriteria.max_price_aed || undefined,
+    minAreaSqft: dbCriteria.min_area_sqft || undefined,
+    maxAreaSqft: dbCriteria.max_area_sqft || undefined,
     keywords: dbCriteria.keywords || undefined,
     additionalNotes: dbCriteria.ai_prompt || undefined,
   };
 }
 
-// Format buyer requirements for prompt
-function formatRequirements(req: BuyerRequirements): string {
-  const lines: string[] = [`Search: "${req.name}"`];
-  if (req.propertyTypes?.length) lines.push(`Property types: ${req.propertyTypes.join(', ')}`);
-  if (req.communities?.length) lines.push(`Communities: ${req.communities.join(', ')}`);
-  if (req.developers?.length) lines.push(`Developers: ${req.developers.join(', ')}`);
-  if (req.bedrooms?.length) lines.push(`Bedrooms: ${req.bedrooms.join(', ')}`);
-  if (req.bathrooms?.length) lines.push(`Bathrooms: ${req.bathrooms.join(', ')}`);
-  if (req.minPriceAed !== undefined || req.maxPriceAed !== undefined) {
-    const min = req.minPriceAed ? `AED ${req.minPriceAed.toLocaleString()}` : 'any';
-    const max = req.maxPriceAed ? `AED ${req.maxPriceAed.toLocaleString()}` : 'any';
-    lines.push(`Price range: ${min} - ${max}`);
-  }
-  if (req.keywords) lines.push(`Keywords: ${req.keywords}`);
-  if (req.additionalNotes) lines.push(`\nIMPORTANT QUALIFICATION CRITERIA:\n${req.additionalNotes}`);
-  return lines.join('\n');
-}
-
-// Format listing for prompt
-function formatListing(hit: TypesenseHit): string {
-  const doc = hit.document;
-  const data = doc.data;
-  const lines: string[] = [
-    `Type: ${data.property_type}`,
-    `Transaction: ${data.transaction_type}`,
-    `Location: ${data.community || data.location_raw || 'Not specified'}`,
-  ];
-  if (data.developer) lines.push(`Developer: ${data.developer}`);
-  if (data.bedrooms !== undefined) lines.push(`Bedrooms: ${data.bedrooms}`);
-  if (data.bathrooms !== undefined) lines.push(`Bathrooms: ${data.bathrooms}`);
-  if (data.price_aed) lines.push(`Price: AED ${data.price_aed.toLocaleString()}`);
-  if (data.area_sqft) lines.push(`Area: ${data.area_sqft} sqft`);
-  if (data.furnishing) lines.push(`Furnishing: ${data.furnishing}`);
-  if (data.is_off_plan) lines.push(`Off-plan: Yes`);
-  if (data.is_urgent) lines.push(`Urgent: Yes`);
-  if (data.message_body_clean) {
-    const desc = data.message_body_clean.length > 500
-      ? data.message_body_clean.substring(0, 500) + '...'
-      : data.message_body_clean;
-    lines.push(`Description: ${desc}`);
-  }
-  if (data.other_details) lines.push(`Details: ${data.other_details}`);
-  return lines.join('\n');
-}
-
-// Build Gemini prompt for a listing
+// Build Gemini prompt for a listing using the granular template system
 function buildGeminiPrompt(listing: TypesenseHit, requirements: BuyerRequirements, promptTemplate: string): string {
-  return promptTemplate
-    .replace('{requirements}', formatRequirements(requirements))
-    .replace('{listing}', formatListing(listing));
+  // Use the new granular template system
+  return buildPromptFromTemplate(promptTemplate, requirements, listing);
 }
 
 // Call Gemini API and return both request and response
@@ -248,10 +179,7 @@ export async function POST(request: NextRequest) {
 
       try {
         const body = await request.json();
-        const { buyerId, criteriaId, debugMode = false, qualificationPrompt: customPrompt } = body;
-
-        // Use custom prompt if provided, otherwise use default
-        const activePrompt = customPrompt || QUALIFICATION_PROMPT;
+        const { buyerId, criteriaId, debugMode = false, qualificationPrompt: customPromptFromUI } = body;
 
         if (!buyerId && !criteriaId) {
           sendEvent({ step: 'error', message: 'Either buyerId or criteriaId is required' });
@@ -269,7 +197,22 @@ export async function POST(request: NextRequest) {
           return;
         }
 
-        // Fetch criteria
+        // Fetch the default system prompt from app_settings
+        let defaultSystemPrompt = DEFAULT_SYSTEM_PROMPT;
+        const { data: defaultPromptSetting } = await supabase
+          .from('app_settings')
+          .select('value')
+          .eq('key', 'default_system_prompt')
+          .single();
+
+        if (defaultPromptSetting?.value) {
+          const setting = defaultPromptSetting.value as SystemPromptSetting;
+          if (setting.template) {
+            defaultSystemPrompt = setting.template;
+          }
+        }
+
+        // Fetch criteria with buyer info (includes buyer.system_prompt)
         let query = supabase
           .from('buyer_criteria')
           .select(`*, buyer:buyers(*)`)
@@ -374,6 +317,29 @@ export async function POST(request: NextRequest) {
 
             // Step 3: Qualify with Gemini (in parallel batches to avoid timeouts)
             const buyerRequirements = toBuyerRequirements(criteria);
+
+            // Determine which prompt template to use:
+            // 1. UI-provided custom prompt (highest priority)
+            // 2. Buyer's custom system_prompt
+            // 3. Default system prompt from app_settings
+            const buyer = criteria.buyer as Buyer | null;
+            const activePrompt = customPromptFromUI || buyer?.system_prompt || defaultSystemPrompt;
+
+            // Debug: Log which prompt source is being used
+            if (debugMode) {
+              const promptSource = customPromptFromUI
+                ? 'UI (custom)'
+                : buyer?.system_prompt
+                  ? 'Buyer-specific'
+                  : 'Default';
+              sendEvent({
+                step: 'debug_prompt_source',
+                criteriaName,
+                promptSource,
+                promptLength: activePrompt.length,
+              });
+            }
+
             const qualifiedMatches: Array<{
               listing: TypesenseHit;
               qualification: { score: number; isMatch: boolean; explanation: string; highlights: string[]; concerns: string[] };
