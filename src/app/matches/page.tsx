@@ -1,11 +1,20 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase/client";
+
+// Filter option types for typeahead
+interface FilterOption {
+  type: "buyer" | "criteria" | "all";
+  id: string;
+  label: string;
+  sublabel?: string;
+  count?: number;
+}
 
 interface MatchWithDetails {
   id: string;
@@ -102,6 +111,16 @@ export default function MatchesPage() {
   const [viewMode, setViewMode] = useState<ViewMode>("by-criteria");
   const [deduplicateAcrossCriteria, setDeduplicateAcrossCriteria] = useState(true);
 
+  // Collapsed groups state - tracks which groups are collapsed
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  // Typeahead filter state
+  const [selectedFilter, setSelectedFilter] = useState<FilterOption | null>(null);
+  const [filterQuery, setFilterQuery] = useState("");
+  const [showFilterDropdown, setShowFilterDropdown] = useState(false);
+  const filterInputRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     async function fetchMatches() {
       if (!isSupabaseConfigured()) {
@@ -158,9 +177,135 @@ export default function MatchesPage() {
     }
   }, [matches]);
 
-  // Filter matches by search query
+  // Click outside handler for dropdown
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(event.target as Node) &&
+        filterInputRef.current &&
+        !filterInputRef.current.contains(event.target as Node)
+      ) {
+        setShowFilterDropdown(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Build filter options from matches (buyers and criteria with counts)
+  const filterOptions = useMemo((): FilterOption[] => {
+    const buyerMap = new Map<string, { name: string; count: number }>();
+    const criteriaMap = new Map<string, { name: string; buyerName: string; count: number }>();
+
+    for (const match of matches) {
+      const buyerId = match.criteria?.buyer?.id;
+      const buyerName = match.criteria?.buyer?.name;
+      const criteriaId = match.criteria?.id;
+      const criteriaName = match.criteria?.name;
+
+      if (buyerId && buyerName) {
+        const existing = buyerMap.get(buyerId);
+        buyerMap.set(buyerId, {
+          name: buyerName,
+          count: (existing?.count || 0) + 1,
+        });
+      }
+
+      if (criteriaId && criteriaName) {
+        const existing = criteriaMap.get(criteriaId);
+        criteriaMap.set(criteriaId, {
+          name: criteriaName,
+          buyerName: buyerName || "Unknown",
+          count: (existing?.count || 0) + 1,
+        });
+      }
+    }
+
+    const options: FilterOption[] = [
+      { type: "all", id: "all", label: "All Matches", count: matches.length },
+    ];
+
+    // Add buyers sorted by count
+    const buyers = Array.from(buyerMap.entries())
+      .sort((a, b) => b[1].count - a[1].count)
+      .map(([id, { name, count }]): FilterOption => ({
+        type: "buyer",
+        id,
+        label: name,
+        count,
+      }));
+
+    // Add criteria sorted by count
+    const criteria = Array.from(criteriaMap.entries())
+      .sort((a, b) => b[1].count - a[1].count)
+      .map(([id, { name, buyerName, count }]): FilterOption => ({
+        type: "criteria",
+        id,
+        label: name,
+        sublabel: buyerName,
+        count,
+      }));
+
+    return [...options, ...buyers, ...criteria];
+  }, [matches]);
+
+  // Filter options by query for typeahead
+  const filteredOptions = useMemo(() => {
+    if (!filterQuery) return filterOptions;
+    const query = filterQuery.toLowerCase();
+    return filterOptions.filter(
+      (opt) =>
+        opt.label.toLowerCase().includes(query) ||
+        opt.sublabel?.toLowerCase().includes(query)
+    );
+  }, [filterOptions, filterQuery]);
+
+  // Toggle group collapse
+  const toggleGroupCollapse = useCallback((groupKey: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) {
+        next.delete(groupKey);
+      } else {
+        next.add(groupKey);
+      }
+      return next;
+    });
+  }, []);
+
+  // Handle filter selection
+  const handleSelectFilter = useCallback((option: FilterOption) => {
+    if (option.type === "all") {
+      setSelectedFilter(null);
+      setViewMode("flat");
+    } else {
+      setSelectedFilter(option);
+      setViewMode(option.type === "buyer" ? "by-criteria" : "by-buyer");
+    }
+    setFilterQuery("");
+    setShowFilterDropdown(false);
+  }, []);
+
+  // Clear filter
+  const clearFilter = useCallback(() => {
+    setSelectedFilter(null);
+    setFilterQuery("");
+  }, []);
+
+  // Filter matches by search query AND selected filter (buyer/criteria)
   const filteredMatches = useMemo(() => {
     return matches.filter((match) => {
+      // First, filter by selected buyer/criteria
+      if (selectedFilter) {
+        if (selectedFilter.type === "buyer") {
+          if (match.criteria?.buyer?.id !== selectedFilter.id) return false;
+        } else if (selectedFilter.type === "criteria") {
+          if (match.criteria?.id !== selectedFilter.id) return false;
+        }
+      }
+
+      // Then, filter by search query
       if (!searchQuery) return true;
       const query = searchQuery.toLowerCase();
       const data = match.listing_data?.data || {};
@@ -172,7 +317,7 @@ export default function MatchesPage() {
         data.message_body_clean?.toLowerCase().includes(query)
       );
     });
-  }, [matches, searchQuery]);
+  }, [matches, searchQuery, selectedFilter]);
 
   // Deduplicate matches by listing_id if deduplicateAcrossCriteria is enabled
   // Keeps the match with the highest relevance score
@@ -237,6 +382,22 @@ export default function MatchesPage() {
     return Array.from(groups.values()).sort((a, b) => b.matches.length - a.matches.length);
   }, [deduplicatedMatches, viewMode]);
 
+  // Collapse/expand all groups (must be after groupedMatches)
+  const collapseAllGroups = useCallback(() => {
+    const allKeys = new Set(groupedMatches.map((g) => g.key));
+    setCollapsedGroups(allKeys);
+  }, [groupedMatches]);
+
+  const expandAllGroups = useCallback(() => {
+    setCollapsedGroups(new Set());
+  }, []);
+
+  // Check if all groups are collapsed
+  const allCollapsed = useMemo(() => {
+    if (groupedMatches.length === 0) return false;
+    return groupedMatches.every((g) => collapsedGroups.has(g.key));
+  }, [groupedMatches, collapsedGroups]);
+
   // Stats for the header
   const stats = useMemo(() => {
     const uniqueListings = new Set(filteredMatches.map((m) => m.listing_id)).size;
@@ -279,12 +440,123 @@ export default function MatchesPage() {
       {/* Search and View Controls */}
       <Card>
         <CardContent className="pt-6 space-y-4">
-          <Input
-            placeholder="Search by buyer, criteria, location, or description..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="max-w-md"
-          />
+          {/* Typeahead Filter */}
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="relative">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-gray-500">Filter:</span>
+                {selectedFilter ? (
+                  <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-lg">
+                    <Badge variant={selectedFilter.type === "buyer" ? "default" : "secondary"} className="text-xs">
+                      {selectedFilter.type === "buyer" ? "Buyer" : "Criteria"}
+                    </Badge>
+                    <span className="text-sm font-medium text-blue-900">{selectedFilter.label}</span>
+                    {selectedFilter.sublabel && (
+                      <span className="text-xs text-blue-600">({selectedFilter.sublabel})</span>
+                    )}
+                    <button
+                      onClick={clearFilter}
+                      className="ml-1 text-blue-400 hover:text-blue-600"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <Input
+                      ref={filterInputRef}
+                      placeholder="Search buyer or criteria..."
+                      value={filterQuery}
+                      onChange={(e) => {
+                        setFilterQuery(e.target.value);
+                        setShowFilterDropdown(true);
+                      }}
+                      onFocus={() => setShowFilterDropdown(true)}
+                      className="w-64"
+                    />
+                    {showFilterDropdown && (
+                      <div
+                        ref={dropdownRef}
+                        className="absolute z-50 mt-1 w-80 max-h-80 overflow-auto bg-white border border-gray-200 rounded-lg shadow-lg"
+                      >
+                        {filteredOptions.length === 0 ? (
+                          <div className="px-4 py-3 text-sm text-gray-500">No matches found</div>
+                        ) : (
+                          <>
+                            {/* All option */}
+                            {filteredOptions.filter(o => o.type === "all").map((option) => (
+                              <button
+                                key={option.id}
+                                onClick={() => handleSelectFilter(option)}
+                                className="w-full px-4 py-2 text-left hover:bg-gray-50 flex items-center justify-between border-b"
+                              >
+                                <span className="font-medium text-gray-900">{option.label}</span>
+                                <Badge variant="outline" className="text-xs">{option.count}</Badge>
+                              </button>
+                            ))}
+
+                            {/* Buyers section */}
+                            {filteredOptions.some(o => o.type === "buyer") && (
+                              <div className="border-b">
+                                <div className="px-4 py-1.5 bg-gray-50 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                                  Buyers
+                                </div>
+                                {filteredOptions.filter(o => o.type === "buyer").map((option) => (
+                                  <button
+                                    key={option.id}
+                                    onClick={() => handleSelectFilter(option)}
+                                    className="w-full px-4 py-2 text-left hover:bg-blue-50 flex items-center justify-between"
+                                  >
+                                    <span className="text-gray-900">{option.label}</span>
+                                    <Badge variant="secondary" className="text-xs">{option.count} matches</Badge>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Criteria section */}
+                            {filteredOptions.some(o => o.type === "criteria") && (
+                              <div>
+                                <div className="px-4 py-1.5 bg-gray-50 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                                  Criteria
+                                </div>
+                                {filteredOptions.filter(o => o.type === "criteria").map((option) => (
+                                  <button
+                                    key={option.id}
+                                    onClick={() => handleSelectFilter(option)}
+                                    className="w-full px-4 py-2 text-left hover:bg-blue-50 flex items-center justify-between"
+                                  >
+                                    <div>
+                                      <div className="text-gray-900">{option.label}</div>
+                                      {option.sublabel && (
+                                        <div className="text-xs text-gray-500">{option.sublabel}</div>
+                                      )}
+                                    </div>
+                                    <Badge variant="secondary" className="text-xs">{option.count} matches</Badge>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Text search within filtered results */}
+            <Input
+              placeholder="Search within results..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-64"
+            />
+          </div>
+
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
               <span className="text-sm text-gray-500">View:</span>
@@ -309,6 +581,31 @@ export default function MatchesPage() {
                 </button>
               </div>
             </div>
+
+            {/* Collapse/Expand toggle (only when not in flat mode) */}
+            {viewMode !== "flat" && groupedMatches.length > 1 && (
+              <button
+                onClick={allCollapsed ? expandAllGroups : collapseAllGroups}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
+              >
+                {allCollapsed ? (
+                  <>
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                    Expand All
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                    </svg>
+                    Collapse All
+                  </>
+                )}
+              </button>
+            )}
+
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
@@ -333,10 +630,24 @@ export default function MatchesPage() {
             </CardContent>
           </Card>
         ) : (
-          groupedMatches.map((group) => (
+          groupedMatches.map((group) => {
+            const isGroupCollapsed = collapsedGroups.has(group.key);
+
+            return (
             <div key={group.key} className="space-y-4">
               {viewMode !== "flat" && (
-                <div className="flex items-center gap-2">
+                <button
+                  onClick={() => toggleGroupCollapse(group.key)}
+                  className="flex items-center gap-2 w-full text-left hover:bg-gray-50 px-2 py-1 -mx-2 rounded-lg transition-colors group"
+                >
+                  <svg
+                    className={`w-4 h-4 text-gray-400 transition-transform ${isGroupCollapsed ? "" : "rotate-90"}`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
                   <h2 className="text-lg font-semibold">{group.label}</h2>
                   {group.sublabel && (
                     <Badge variant="outline" className="text-xs">{group.sublabel}</Badge>
@@ -344,14 +655,14 @@ export default function MatchesPage() {
                   <Badge variant="secondary" className="text-xs">
                     {group.matches.length} match{group.matches.length !== 1 ? "es" : ""}
                   </Badge>
-                </div>
+                </button>
               )}
               {viewMode === "flat" && (
                 <h2 className="text-lg font-semibold">
                   {deduplicatedMatches.length} Match{deduplicatedMatches.length !== 1 ? "es" : ""}
                 </h2>
               )}
-              {group.matches.map((match) => {
+              {!isGroupCollapsed && group.matches.map((match) => {
             const data = match.listing_data?.data || {};
             const contact = contacts[match.listing_id];
             const capacity = extractCapacity(data.message_body_clean);
@@ -475,7 +786,7 @@ export default function MatchesPage() {
             );
           })}
             </div>
-          ))
+          );})
         )}
       </div>
     </div>
