@@ -364,6 +364,24 @@ export async function POST(request: NextRequest) {
             const rawFound = rawHits.length;
             results.totalListingsFound += rawFound;
 
+            // Debug: Send the raw Typesense response (before processing)
+            if (debugMode) {
+              // Cast to Record to access all fields from actual Typesense API response
+              const typesenseResponse = searchResult.results[0] as unknown as Record<string, unknown>;
+              sendEvent({
+                step: 'debug_typesense_response',
+                criteriaName,
+                rawResponse: {
+                  found: (typesenseResponse?.found as number) || 0,
+                  out_of: (typesenseResponse?.out_of as number) || 0,
+                  page: (typesenseResponse?.page as number) || 1,
+                  request_params: typesenseResponse?.request_params,
+                  search_time_ms: (typesenseResponse?.search_time_ms as number) || 0,
+                  hits_count: rawHits.length,
+                },
+              });
+            }
+
             // Step 2: Found results - include raw listings in debug mode
             sendEvent({
               step: 'found',
