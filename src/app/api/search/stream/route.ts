@@ -3,6 +3,9 @@
  *
  * Runs a search with real-time progress updates via Server-Sent Events.
  * Debug mode includes raw payloads for Typesense results, Gemini prompts, and responses.
+ *
+ * Supports temporal deduplication: uses last_run_at to only search for new listings.
+ * Pass `fullRescan: true` in the request body to ignore last_run_at and do a full search.
  */
 
 import { NextRequest } from 'next/server';
@@ -21,19 +24,40 @@ interface SearchResults {
   totalSearches: number;
   totalMatches: number;
   newMatches: number;
+  totalListingsFound: number;
+  totalListingsDeduped: number;
+  fullRescan: boolean;
   errors: string[];
   criteriaResults: Array<{
     criteriaId: string;
     criteriaName: string;
+    buyerName: string;
     found: number;
+    deduped: number;
     qualified: number;
     saved: number;
+    usedTemporalFilter: boolean;
   }>;
   duration: number;
 }
 
-// Convert DB criteria to Typesense criteria
-function toTypesenseCriteria(dbCriteria: BuyerCriteria): Criteria {
+// Default days to look back if no last_run_at is set
+const DEFAULT_LOOKBACK_DAYS = 7;
+
+// Convert DB criteria to Typesense criteria with temporal filtering
+function toTypesenseCriteria(dbCriteria: BuyerCriteria, useTemporalFilter: boolean = true): Criteria {
+  // Determine the date filter based on last_run_at (temporal deduplication)
+  let dateFrom: number | undefined = undefined;
+
+  if (useTemporalFilter && dbCriteria.last_run_at) {
+    // Use last_run_at for temporal filtering - only get listings since last run
+    dateFrom = Math.floor(new Date(dbCriteria.last_run_at).getTime() / 1000);
+  } else if (dbCriteria.date_from) {
+    // Use explicit date_from from criteria if set
+    dateFrom = Math.floor(new Date(dbCriteria.date_from).getTime() / 1000);
+  }
+  // If neither is set, sinceDaysAgo will be used as fallback
+
   return {
     userId: process.env.APP_USER_ID || 'user_default',
     q: dbCriteria.keywords || '*',
@@ -60,11 +84,34 @@ function toTypesenseCriteria(dbCriteria: BuyerCriteria): Criteria {
     isCommunityAgnostic: dbCriteria.is_community_agnostic ?? undefined,
     furnishing: dbCriteria.furnishing || undefined,
     mortgageOrCash: dbCriteria.mortgage_or_cash || undefined,
-    dateFrom: dbCriteria.date_from ? Math.floor(new Date(dbCriteria.date_from).getTime() / 1000) : undefined,
+    // Temporal filtering: use dateFrom from last_run_at if available
+    dateFrom: dateFrom,
     dateTo: dbCriteria.date_to ? Math.floor(new Date(dbCriteria.date_to).getTime() / 1000) : undefined,
-    sinceDaysAgo: 365,
+    // Fallback: if no dateFrom is set, use sinceDaysAgo
+    sinceDaysAgo: dateFrom ? undefined : DEFAULT_LOOKBACK_DAYS,
     perPage: 100, // Increased from 25 to get more results
   };
+}
+
+/**
+ * Deduplicate listings by ID within a single search run.
+ * Returns only listings that haven't been seen before.
+ */
+function deduplicateListings(
+  hits: TypesenseHit[],
+  seenListingIds: Set<string>
+): TypesenseHit[] {
+  const uniqueHits: TypesenseHit[] = [];
+
+  for (const hit of hits) {
+    const listingId = hit.document.id;
+    if (!seenListingIds.has(listingId)) {
+      seenListingIds.add(listingId);
+      uniqueHits.push(hit);
+    }
+  }
+
+  return uniqueHits;
 }
 
 // Convert DB criteria to buyer requirements for Gemini
@@ -179,7 +226,13 @@ export async function POST(request: NextRequest) {
 
       try {
         const body = await request.json();
-        const { buyerId, criteriaId, debugMode = false, qualificationPrompt: customPromptFromUI } = body;
+        const {
+          buyerId,
+          criteriaId,
+          debugMode = false,
+          qualificationPrompt: customPromptFromUI,
+          fullRescan = false, // If true, ignore last_run_at and do full search
+        } = body;
 
         if (!buyerId && !criteriaId) {
           sendEvent({ step: 'error', message: 'Either buyerId or criteriaId is required' });
@@ -239,6 +292,9 @@ export async function POST(request: NextRequest) {
               totalSearches: 0,
               totalMatches: 0,
               newMatches: 0,
+              totalListingsFound: 0,
+              totalListingsDeduped: 0,
+              fullRescan,
               errors: [],
               criteriaResults: [],
               duration: Date.now() - startTime,
@@ -252,10 +308,19 @@ export async function POST(request: NextRequest) {
           totalSearches: 0,
           totalMatches: 0,
           newMatches: 0,
+          totalListingsFound: 0,
+          totalListingsDeduped: 0,
+          fullRescan,
           errors: [],
           criteriaResults: [],
           duration: 0,
         };
+
+        // Track seen listing IDs across all criteria for in-memory deduplication
+        const seenListingIds = new Set<string>();
+
+        // Track criteria IDs that were successfully processed (for updating last_run_at)
+        const processedCriteriaIds: string[] = [];
 
         // Process each criteria
         for (const criteria of criteriaList) {
@@ -265,14 +330,24 @@ export async function POST(request: NextRequest) {
             break;
           }
 
+          const buyerName = (criteria.buyer as { name: string })?.name || 'Unknown';
+          // Use temporal filter unless fullRescan is requested
+          const useTemporalFilter = !fullRescan;
+          const usedTemporalFilter = useTemporalFilter && !!criteria.last_run_at;
+
           try {
             results.totalSearches++;
             const criteriaName = criteria.name;
 
-            // Step 1: Build Typesense query
-            sendEvent({ step: 'searching', criteriaName });
+            // Step 1: Build Typesense query (uses last_run_at for temporal filtering unless fullRescan)
+            sendEvent({
+              step: 'searching',
+              criteriaName,
+              usedTemporalFilter,
+              lastRunAt: criteria.last_run_at,
+            });
 
-            const searchCriteria = toTypesenseCriteria(criteria);
+            const searchCriteria = toTypesenseCriteria(criteria, useTemporalFilter);
             const searchBody = buildSimpleSearchBody(searchCriteria);
 
             // Debug: Send the Typesense query
@@ -285,18 +360,19 @@ export async function POST(request: NextRequest) {
             }
 
             const searchResult = await typesenseMultiSearch(typesenseKey, searchBody);
-            const hits = searchResult.results[0]?.hits || [];
-            const found = searchResult.results[0]?.found || 0;
+            const rawHits = searchResult.results[0]?.hits || [];
+            const rawFound = rawHits.length;
+            results.totalListingsFound += rawFound;
 
             // Step 2: Found results - include raw listings in debug mode
             sendEvent({
               step: 'found',
               criteriaName,
-              count: hits.length,
-              total: found,
+              count: rawHits.length,
+              total: searchResult.results[0]?.found || 0,
               // Debug: Include raw listings for review
               ...(debugMode && {
-                listings: hits.map((hit: TypesenseHit) => ({
+                listings: rawHits.map((hit: TypesenseHit) => ({
                   id: hit.document.id,
                   data: hit.document.data,
                   highlights: hit.highlights,
@@ -304,14 +380,49 @@ export async function POST(request: NextRequest) {
               }),
             });
 
+            if (rawHits.length === 0) {
+              results.criteriaResults.push({
+                criteriaId: criteria.id,
+                criteriaName,
+                buyerName,
+                found: 0,
+                deduped: 0,
+                qualified: 0,
+                saved: 0,
+                usedTemporalFilter,
+              });
+              // Still mark as processed for updating last_run_at
+              processedCriteriaIds.push(criteria.id);
+              continue;
+            }
+
+            // Step 2.5: Deduplicate listings that were already seen in this run
+            const hits = deduplicateListings(rawHits, seenListingIds);
+            const dedupedCount = rawFound - hits.length;
+            results.totalListingsDeduped += dedupedCount;
+
+            if (dedupedCount > 0) {
+              sendEvent({
+                step: 'deduped',
+                criteriaName,
+                originalCount: rawFound,
+                dedupedCount,
+                remainingCount: hits.length,
+              });
+            }
+
             if (hits.length === 0) {
               results.criteriaResults.push({
                 criteriaId: criteria.id,
                 criteriaName,
-                found: 0,
+                buyerName,
+                found: rawFound,
+                deduped: dedupedCount,
                 qualified: 0,
                 saved: 0,
+                usedTemporalFilter,
               });
+              processedCriteriaIds.push(criteria.id);
               continue;
             }
 
@@ -492,10 +603,14 @@ export async function POST(request: NextRequest) {
               results.criteriaResults.push({
                 criteriaId: criteria.id,
                 criteriaName,
-                found,
+                buyerName,
+                found: rawFound,
+                deduped: dedupedCount,
                 qualified: 0,
                 saved: 0,
+                usedTemporalFilter,
               });
+              processedCriteriaIds.push(criteria.id);
               continue;
             }
 
@@ -532,12 +647,31 @@ export async function POST(request: NextRequest) {
             results.criteriaResults.push({
               criteriaId: criteria.id,
               criteriaName,
-              found,
+              buyerName,
+              found: rawFound,
+              deduped: dedupedCount,
               qualified: goodMatches.length,
               saved: savedCount,
+              usedTemporalFilter,
             });
+
+            // Mark this criteria as successfully processed
+            processedCriteriaIds.push(criteria.id);
           } catch (criteriaError) {
             results.errors.push(`Error processing criteria ${criteria.name}: ${criteriaError}`);
+          }
+        }
+
+        // Update last_run_at for all successfully processed criteria
+        if (processedCriteriaIds.length > 0) {
+          const now = new Date().toISOString();
+          const { error: updateError } = await supabase
+            .from('buyer_criteria')
+            .update({ last_run_at: now, updated_at: now })
+            .in('id', processedCriteriaIds);
+
+          if (updateError) {
+            results.errors.push(`Failed to update last_run_at: ${updateError.message}`);
           }
         }
 

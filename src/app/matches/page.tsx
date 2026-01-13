@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,11 +27,22 @@ interface MatchWithDetails {
   is_notified: boolean;
   created_at: string;
   criteria: {
+    id: string;
     name: string;
     buyer: {
+      id: string;
       name: string;
     };
   };
+}
+
+type ViewMode = "flat" | "by-criteria" | "by-buyer";
+
+interface GroupedMatches {
+  key: string;
+  label: string;
+  sublabel?: string;
+  matches: MatchWithDetails[];
 }
 
 interface ContactInfo {
@@ -88,6 +99,8 @@ export default function MatchesPage() {
   const [loading, setLoading] = useState(true);
   const [loadingContacts, setLoadingContacts] = useState(false);
   const [expandedMatch, setExpandedMatch] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("by-criteria");
+  const [deduplicateAcrossCriteria, setDeduplicateAcrossCriteria] = useState(true);
 
   useEffect(() => {
     async function fetchMatches() {
@@ -102,12 +115,13 @@ export default function MatchesPage() {
           .select(`
             *,
             criteria:buyer_criteria(
+              id,
               name,
-              buyer:buyers(name)
+              buyer:buyers(id, name)
             )
           `)
           .order("created_at", { ascending: false })
-          .limit(100);
+          .limit(200);
 
         if (error) throw error;
         setMatches(data || []);
@@ -144,18 +158,93 @@ export default function MatchesPage() {
     }
   }, [matches]);
 
-  const filteredMatches = matches.filter((match) => {
-    if (!searchQuery) return true;
-    const query = searchQuery.toLowerCase();
-    const data = match.listing_data?.data || {};
-    return (
-      match.criteria?.buyer?.name?.toLowerCase().includes(query) ||
-      match.criteria?.name?.toLowerCase().includes(query) ||
-      data.community?.toLowerCase().includes(query) ||
-      data.location_raw?.toLowerCase().includes(query) ||
-      data.message_body_clean?.toLowerCase().includes(query)
-    );
-  });
+  // Filter matches by search query
+  const filteredMatches = useMemo(() => {
+    return matches.filter((match) => {
+      if (!searchQuery) return true;
+      const query = searchQuery.toLowerCase();
+      const data = match.listing_data?.data || {};
+      return (
+        match.criteria?.buyer?.name?.toLowerCase().includes(query) ||
+        match.criteria?.name?.toLowerCase().includes(query) ||
+        data.community?.toLowerCase().includes(query) ||
+        data.location_raw?.toLowerCase().includes(query) ||
+        data.message_body_clean?.toLowerCase().includes(query)
+      );
+    });
+  }, [matches, searchQuery]);
+
+  // Deduplicate matches by listing_id if deduplicateAcrossCriteria is enabled
+  // Keeps the match with the highest relevance score
+  const deduplicatedMatches = useMemo(() => {
+    if (!deduplicateAcrossCriteria) return filteredMatches;
+
+    const seenListings = new Map<string, MatchWithDetails>();
+    for (const match of filteredMatches) {
+      const existing = seenListings.get(match.listing_id);
+      if (!existing || (match.relevance_score || 0) > (existing.relevance_score || 0)) {
+        seenListings.set(match.listing_id, match);
+      }
+    }
+    return Array.from(seenListings.values());
+  }, [filteredMatches, deduplicateAcrossCriteria]);
+
+  // Group matches by criteria or buyer
+  const groupedMatches = useMemo((): GroupedMatches[] => {
+    if (viewMode === "flat") {
+      return [{
+        key: "all",
+        label: "All Matches",
+        matches: deduplicatedMatches,
+      }];
+    }
+
+    if (viewMode === "by-criteria") {
+      const groups = new Map<string, GroupedMatches>();
+      for (const match of deduplicatedMatches) {
+        const criteriaId = match.criteria?.id || "unknown";
+        const criteriaName = match.criteria?.name || "Unknown Criteria";
+        const buyerName = match.criteria?.buyer?.name || "Unknown Buyer";
+
+        if (!groups.has(criteriaId)) {
+          groups.set(criteriaId, {
+            key: criteriaId,
+            label: criteriaName,
+            sublabel: buyerName,
+            matches: [],
+          });
+        }
+        groups.get(criteriaId)!.matches.push(match);
+      }
+      return Array.from(groups.values()).sort((a, b) => b.matches.length - a.matches.length);
+    }
+
+    // by-buyer
+    const groups = new Map<string, GroupedMatches>();
+    for (const match of deduplicatedMatches) {
+      const buyerId = match.criteria?.buyer?.id || "unknown";
+      const buyerName = match.criteria?.buyer?.name || "Unknown Buyer";
+
+      if (!groups.has(buyerId)) {
+        groups.set(buyerId, {
+          key: buyerId,
+          label: buyerName,
+          matches: [],
+        });
+      }
+      groups.get(buyerId)!.matches.push(match);
+    }
+    return Array.from(groups.values()).sort((a, b) => b.matches.length - a.matches.length);
+  }, [deduplicatedMatches, viewMode]);
+
+  // Stats for the header
+  const stats = useMemo(() => {
+    const uniqueListings = new Set(filteredMatches.map((m) => m.listing_id)).size;
+    const uniqueCriteria = new Set(filteredMatches.map((m) => m.criteria?.id)).size;
+    const uniqueBuyers = new Set(filteredMatches.map((m) => m.criteria?.buyer?.id)).size;
+    const duplicateCount = filteredMatches.length - deduplicatedMatches.length;
+    return { uniqueListings, uniqueCriteria, uniqueBuyers, duplicateCount };
+  }, [filteredMatches, deduplicatedMatches]);
 
   if (loading) {
     return (
@@ -172,7 +261,10 @@ export default function MatchesPage() {
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Matches</h1>
           <p className="text-gray-500 mt-1">
-            All property matches across all buyers
+            {stats.uniqueListings} unique listing{stats.uniqueListings !== 1 ? "s" : ""} across {stats.uniqueCriteria} criteria from {stats.uniqueBuyers} buyer{stats.uniqueBuyers !== 1 ? "s" : ""}
+            {stats.duplicateCount > 0 && deduplicateAcrossCriteria && (
+              <span className="text-orange-600"> ({stats.duplicateCount} duplicate{stats.duplicateCount !== 1 ? "s" : ""} hidden)</span>
+            )}
           </p>
         </div>
         <Button
@@ -184,32 +276,82 @@ export default function MatchesPage() {
         </Button>
       </div>
 
-      {/* Search */}
+      {/* Search and View Controls */}
       <Card>
-        <CardContent className="pt-6">
+        <CardContent className="pt-6 space-y-4">
           <Input
             placeholder="Search by buyer, criteria, location, or description..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="max-w-md"
           />
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-gray-500">View:</span>
+              <div className="flex rounded-md border border-gray-200">
+                <button
+                  onClick={() => setViewMode("by-criteria")}
+                  className={`px-3 py-1.5 text-sm ${viewMode === "by-criteria" ? "bg-gray-900 text-white" : "bg-white text-gray-700 hover:bg-gray-50"} rounded-l-md`}
+                >
+                  By Criteria
+                </button>
+                <button
+                  onClick={() => setViewMode("by-buyer")}
+                  className={`px-3 py-1.5 text-sm ${viewMode === "by-buyer" ? "bg-gray-900 text-white" : "bg-white text-gray-700 hover:bg-gray-50"} border-l`}
+                >
+                  By Buyer
+                </button>
+                <button
+                  onClick={() => setViewMode("flat")}
+                  className={`px-3 py-1.5 text-sm ${viewMode === "flat" ? "bg-gray-900 text-white" : "bg-white text-gray-700 hover:bg-gray-50"} rounded-r-md border-l`}
+                >
+                  Flat List
+                </button>
+              </div>
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={deduplicateAcrossCriteria}
+                onChange={(e) => setDeduplicateAcrossCriteria(e.target.checked)}
+                className="rounded border-gray-300"
+              />
+              <span className="text-sm text-gray-700">
+                Hide duplicate listings
+              </span>
+            </label>
+          </div>
         </CardContent>
       </Card>
 
-      {/* Matches List */}
-      <div className="space-y-4">
-        <h2 className="text-lg font-semibold">
-          {filteredMatches.length} Match{filteredMatches.length !== 1 ? "es" : ""}
-        </h2>
-
-        {filteredMatches.length === 0 ? (
+      {/* Grouped Matches */}
+      <div className="space-y-6">
+        {groupedMatches.length === 0 ? (
           <Card>
             <CardContent className="py-8 text-center text-gray-500">
               No matches found. Run a search from a buyer&apos;s page to find matches.
             </CardContent>
           </Card>
         ) : (
-          filteredMatches.map((match) => {
+          groupedMatches.map((group) => (
+            <div key={group.key} className="space-y-4">
+              {viewMode !== "flat" && (
+                <div className="flex items-center gap-2">
+                  <h2 className="text-lg font-semibold">{group.label}</h2>
+                  {group.sublabel && (
+                    <Badge variant="outline" className="text-xs">{group.sublabel}</Badge>
+                  )}
+                  <Badge variant="secondary" className="text-xs">
+                    {group.matches.length} match{group.matches.length !== 1 ? "es" : ""}
+                  </Badge>
+                </div>
+              )}
+              {viewMode === "flat" && (
+                <h2 className="text-lg font-semibold">
+                  {deduplicatedMatches.length} Match{deduplicatedMatches.length !== 1 ? "es" : ""}
+                </h2>
+              )}
+              {group.matches.map((match) => {
             const data = match.listing_data?.data || {};
             const contact = contacts[match.listing_id];
             const capacity = extractCapacity(data.message_body_clean);
@@ -331,7 +473,9 @@ export default function MatchesPage() {
                 </CardContent>
               </Card>
             );
-          })
+          })}
+            </div>
+          ))
         )}
       </div>
     </div>
