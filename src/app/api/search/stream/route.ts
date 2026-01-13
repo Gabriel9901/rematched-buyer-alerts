@@ -14,7 +14,7 @@ import { BuyerCriteria } from '@/lib/supabase/types';
 import { TypesenseHit } from '@/lib/typesense/types';
 
 // Gemini API URL
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:generateContent';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent';
 
 // Qualification prompt template
 const QUALIFICATION_PROMPT = `You are a real estate matching assistant. Analyze how well this property listing matches the buyer's requirements.
