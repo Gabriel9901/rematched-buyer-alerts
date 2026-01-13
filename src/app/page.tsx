@@ -1,65 +1,193 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useState, useEffect } from "react";
+import Link from "next/link";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase/client";
+
+interface Stats {
+  totalBuyers: number;
+  activeCriteria: number;
+  todayMatches: number;
+  totalMatches: number;
+}
+
+export default function DashboardPage() {
+  const [stats, setStats] = useState<Stats>({
+    totalBuyers: 0,
+    activeCriteria: 0,
+    todayMatches: 0,
+    totalMatches: 0,
+  });
+  const [loading, setLoading] = useState(true);
+  const [isConfigured, setIsConfigured] = useState(true);
+
+  useEffect(() => {
+    async function fetchStats() {
+      if (!isSupabaseConfigured()) {
+        setIsConfigured(false);
+        setLoading(false);
+        return;
+      }
+
+      try {
+        // Fetch buyers count
+        const { count: buyersCount } = await supabase
+          .from("buyers")
+          .select("*", { count: "exact", head: true });
+
+        // Fetch active criteria count
+        const { count: criteriaCount } = await supabase
+          .from("buyer_criteria")
+          .select("*", { count: "exact", head: true })
+          .eq("is_active", true);
+
+        // Fetch total matches count
+        const { count: matchesCount } = await supabase
+          .from("matches")
+          .select("*", { count: "exact", head: true });
+
+        // Fetch today's matches count
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const { count: todayCount } = await supabase
+          .from("matches")
+          .select("*", { count: "exact", head: true })
+          .gte("created_at", today.toISOString());
+
+        setStats({
+          totalBuyers: buyersCount || 0,
+          activeCriteria: criteriaCount || 0,
+          todayMatches: todayCount || 0,
+          totalMatches: matchesCount || 0,
+        });
+      } catch (error) {
+        console.error("Error fetching stats:", error);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    fetchStats();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <div className="animate-pulse text-gray-500">Loading dashboard...</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <div className="space-y-8">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
+          <p className="text-gray-500 mt-1">
+            Monitor buyer alerts and property matches
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+        <Link href="/buyers/new">
+          <Button>+ Add Buyer</Button>
+        </Link>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-gray-500">
+              Total Buyers
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-bold">{stats.totalBuyers}</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-gray-500">
+              Active Searches
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-bold">{stats.activeCriteria}</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-gray-500">
+              Today&apos;s Matches
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-bold text-green-600">
+              {stats.todayMatches}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-gray-500">
+              Total Matches
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-bold">{stats.totalMatches}</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Quick Actions */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Quick Actions</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap gap-3">
+            <Link href="/buyers/new">
+              <Button variant="outline">Add New Buyer</Button>
+            </Link>
+            <Link href="/buyers">
+              <Button variant="outline">View All Buyers</Button>
+            </Link>
+            <Link href="/matches">
+              <Button variant="outline">View All Matches</Button>
+            </Link>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Setup Instructions - only show if not configured */}
+      {!isConfigured && (
+        <Card className="bg-blue-50 border-blue-200">
+          <CardHeader>
+            <CardTitle className="text-blue-900">Setup Required</CardTitle>
+          </CardHeader>
+          <CardContent className="text-blue-800 space-y-2">
+            <p>Complete these steps to get started:</p>
+            <ol className="list-decimal list-inside space-y-1">
+              <li>
+                Create a new Supabase project and run the schema from{" "}
+                <code className="bg-blue-100 px-1 rounded">supabase/schema.sql</code>
+              </li>
+              <li>
+                Copy <code className="bg-blue-100 px-1 rounded">.env.example</code> to{" "}
+                <code className="bg-blue-100 px-1 rounded">.env.local</code> and fill in your keys
+              </li>
+              <li>Add your Typesense scoped search key</li>
+              <li>Add your Gemini API key</li>
+              <li>Create a Slack webhook for notifications</li>
+            </ol>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
