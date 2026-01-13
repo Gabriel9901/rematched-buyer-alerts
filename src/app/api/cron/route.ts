@@ -6,10 +6,12 @@
  *
  * Flow:
  * 1. Fetch all active criteria from Supabase
- * 2. For each criteria, search Typesense for listings from the last 24 hours
- * 3. Qualify matches using Gemini AI
- * 4. Save matches to Supabase
- * 5. Send Slack notifications for new matches
+ * 2. For each criteria, search Typesense for listings since last_run_at (temporal dedup)
+ * 3. Deduplicate listings across criteria (in-memory dedup by listing_id)
+ * 4. Qualify matches using Gemini AI
+ * 5. Save matches to Supabase
+ * 6. Update last_run_at for each criteria
+ * 7. Send Slack notifications for new matches
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -19,6 +21,7 @@ import { typesenseMultiSearch } from '@/lib/typesense/client';
 import { qualifyMatches, BuyerRequirements } from '@/lib/gemini/qualify';
 import { sendSlackNotification, sendDailySummary } from '@/lib/slack/notify';
 import { BuyerCriteria } from '@/lib/supabase/types';
+import { TypesenseHit } from '@/lib/typesense/types';
 
 // Verify cron secret to prevent unauthorized access
 function verifyCronSecret(request: NextRequest): boolean {
@@ -27,8 +30,23 @@ function verifyCronSecret(request: NextRequest): boolean {
   return secret === process.env.CRON_SECRET;
 }
 
-// Convert DB criteria to Typesense criteria
-function toTypesenseCriteria(dbCriteria: BuyerCriteria): Criteria {
+// Default days to look back if no last_run_at is set
+const DEFAULT_LOOKBACK_DAYS = 1;
+
+// Convert DB criteria to Typesense criteria with temporal filtering
+function toTypesenseCriteria(dbCriteria: BuyerCriteria, useTemporalFilter: boolean = true): Criteria {
+  // Determine the date filter based on last_run_at (temporal deduplication)
+  let dateFrom: number | undefined = undefined;
+
+  if (useTemporalFilter && dbCriteria.last_run_at) {
+    // Use last_run_at for temporal filtering - only get listings since last run
+    dateFrom = Math.floor(new Date(dbCriteria.last_run_at).getTime() / 1000);
+  } else if (dbCriteria.date_from) {
+    // Use explicit date_from from criteria if set
+    dateFrom = Math.floor(new Date(dbCriteria.date_from).getTime() / 1000);
+  }
+  // If neither is set, sinceDaysAgo will be used as fallback
+
   return {
     userId: process.env.APP_USER_ID || 'user_default',
     q: dbCriteria.keywords || '*',
@@ -57,12 +75,36 @@ function toTypesenseCriteria(dbCriteria: BuyerCriteria): Criteria {
     isCommunityAgnostic: dbCriteria.is_community_agnostic ?? undefined,
     furnishing: dbCriteria.furnishing || undefined,
     mortgageOrCash: dbCriteria.mortgage_or_cash || undefined,
-    dateFrom: dbCriteria.date_from ? Math.floor(new Date(dbCriteria.date_from).getTime() / 1000) : undefined,
+
+    // Temporal filtering: use dateFrom from last_run_at if available
+    dateFrom: dateFrom,
     dateTo: dbCriteria.date_to ? Math.floor(new Date(dbCriteria.date_to).getTime() / 1000) : undefined,
 
-    sinceDaysAgo: 365, // Extended for testing - change back to 1 for production
+    // Fallback: if no dateFrom is set, use sinceDaysAgo
+    sinceDaysAgo: dateFrom ? undefined : DEFAULT_LOOKBACK_DAYS,
     perPage: 50, // Results per criteria to qualify
   };
+}
+
+/**
+ * Deduplicate listings by ID within a single search run.
+ * Returns only listings that haven't been seen before.
+ */
+function deduplicateListings(
+  hits: TypesenseHit[],
+  seenListingIds: Set<string>
+): TypesenseHit[] {
+  const uniqueHits: TypesenseHit[] = [];
+
+  for (const hit of hits) {
+    const listingId = hit.document.id;
+    if (!seenListingIds.has(listingId)) {
+      seenListingIds.add(listingId);
+      uniqueHits.push(hit);
+    }
+  }
+
+  return uniqueHits;
 }
 
 // Convert DB criteria to buyer requirements for Gemini
@@ -90,8 +132,20 @@ export async function GET(request: NextRequest) {
   const results = {
     totalSearches: 0,
     totalMatches: 0,
+    totalListingsFound: 0,
+    totalListingsDeduped: 0,
     errors: [] as string[],
     buyerStats: [] as { name: string; matchCount: number }[],
+    criteriaStats: [] as {
+      criteriaId: string;
+      criteriaName: string;
+      buyerName: string;
+      found: number;
+      deduped: number;
+      qualified: number;
+      saved: number;
+      usedTemporalFilter: boolean;
+    }[],
   };
 
   try {
@@ -126,20 +180,67 @@ export async function GET(request: NextRequest) {
       throw new Error('Missing required API keys (TYPESENSE_SCOPED_KEY or GEMINI_API_KEY)');
     }
 
+    // Track seen listing IDs across all criteria for in-memory deduplication
+    const seenListingIds = new Set<string>();
+
+    // Track criteria IDs that were successfully processed (for updating last_run_at)
+    const processedCriteriaIds: string[] = [];
+
     // 2. Process each criteria
     for (const criteria of criteriaList) {
+      const buyerName = (criteria.buyer as { name: string })?.name || 'Unknown';
+      const usedTemporalFilter = !!criteria.last_run_at;
+
       try {
         results.totalSearches++;
 
-        // Build and execute Typesense search
+        // Build and execute Typesense search (uses last_run_at for temporal filtering)
         const searchCriteria = toTypesenseCriteria(criteria);
         const searchBody = buildSimpleSearchBody(searchCriteria);
         const searchResult = await typesenseMultiSearch(typesenseKey, searchBody);
 
-        const hits = searchResult.results[0]?.hits || [];
-        if (hits.length === 0) continue;
+        const rawHits = searchResult.results[0]?.hits || [];
+        const rawFound = rawHits.length;
+        results.totalListingsFound += rawFound;
 
-        // 3. Qualify matches with Gemini
+        if (rawHits.length === 0) {
+          // Track stats even for empty results
+          results.criteriaStats.push({
+            criteriaId: criteria.id,
+            criteriaName: criteria.name,
+            buyerName,
+            found: 0,
+            deduped: 0,
+            qualified: 0,
+            saved: 0,
+            usedTemporalFilter,
+          });
+          // Still mark as processed for updating last_run_at
+          processedCriteriaIds.push(criteria.id);
+          continue;
+        }
+
+        // 3. Deduplicate listings that were already seen in this run
+        const hits = deduplicateListings(rawHits, seenListingIds);
+        const dedupedCount = rawFound - hits.length;
+        results.totalListingsDeduped += dedupedCount;
+
+        if (hits.length === 0) {
+          results.criteriaStats.push({
+            criteriaId: criteria.id,
+            criteriaName: criteria.name,
+            buyerName,
+            found: rawFound,
+            deduped: dedupedCount,
+            qualified: 0,
+            saved: 0,
+            usedTemporalFilter,
+          });
+          processedCriteriaIds.push(criteria.id);
+          continue;
+        }
+
+        // 4. Qualify matches with Gemini
         const buyerRequirements = toBuyerRequirements(criteria);
         const qualifiedMatches = await qualifyMatches(
           geminiKey,
@@ -154,9 +255,22 @@ export async function GET(request: NextRequest) {
         // Filter to only good matches
         const goodMatches = qualifiedMatches.filter((m) => m.qualification.isMatch);
 
-        if (goodMatches.length === 0) continue;
+        if (goodMatches.length === 0) {
+          results.criteriaStats.push({
+            criteriaId: criteria.id,
+            criteriaName: criteria.name,
+            buyerName,
+            found: rawFound,
+            deduped: dedupedCount,
+            qualified: 0,
+            saved: 0,
+            usedTemporalFilter,
+          });
+          processedCriteriaIds.push(criteria.id);
+          continue;
+        }
 
-        // 4. Save matches to Supabase
+        // 5. Save matches to Supabase
         const matchInserts = goodMatches.map((m) => ({
           criteria_id: criteria.id,
           listing_id: m.listing.document.id,
@@ -182,8 +296,19 @@ export async function GET(request: NextRequest) {
         const newMatchCount = savedMatches?.length || 0;
         results.totalMatches += newMatchCount;
 
+        // Track criteria stats
+        results.criteriaStats.push({
+          criteriaId: criteria.id,
+          criteriaName: criteria.name,
+          buyerName,
+          found: rawFound,
+          deduped: dedupedCount,
+          qualified: goodMatches.length,
+          saved: newMatchCount,
+          usedTemporalFilter,
+        });
+
         // Track buyer stats
-        const buyerName = (criteria.buyer as { name: string })?.name || 'Unknown';
         const existingStat = results.buyerStats.find((s) => s.name === buyerName);
         if (existingStat) {
           existingStat.matchCount += newMatchCount;
@@ -191,7 +316,10 @@ export async function GET(request: NextRequest) {
           results.buyerStats.push({ name: buyerName, matchCount: newMatchCount });
         }
 
-        // 5. Send Slack notification for new matches
+        // Mark this criteria as successfully processed
+        processedCriteriaIds.push(criteria.id);
+
+        // 6. Send Slack notification for new matches
         if (slackWebhook && newMatchCount > 0 && savedMatches) {
           try {
             // Fetch full match details for notification
@@ -228,6 +356,19 @@ export async function GET(request: NextRequest) {
         results.errors.push(
           `Error processing criteria ${criteria.name}: ${criteriaError}`
         );
+      }
+    }
+
+    // 7. Update last_run_at for all successfully processed criteria
+    if (processedCriteriaIds.length > 0) {
+      const now = new Date().toISOString();
+      const { error: updateError } = await supabase
+        .from('buyer_criteria')
+        .update({ last_run_at: now, updated_at: now })
+        .in('id', processedCriteriaIds);
+
+      if (updateError) {
+        results.errors.push(`Failed to update last_run_at: ${updateError.message}`);
       }
     }
 

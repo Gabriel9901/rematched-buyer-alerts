@@ -59,6 +59,9 @@ export interface BuyerCriteria {
   // AI prompt for Gemini qualification
   ai_prompt?: string | null;
 
+  // Query run tracking for temporal deduplication
+  last_run_at?: string | null;
+
   created_at: string;
   updated_at: string;
 }

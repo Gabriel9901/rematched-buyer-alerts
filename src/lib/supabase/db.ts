@@ -247,3 +247,41 @@ export async function markMatchesNotified(ids: string[]): Promise<void> {
 
   if (error) throw error;
 }
+
+// =============================================================================
+// CRITERIA RUN TRACKING
+// =============================================================================
+
+/**
+ * Update the last_run_at timestamp for a criteria after a successful search.
+ * This is used for temporal deduplication - subsequent runs will only search
+ * for listings newer than this timestamp.
+ */
+export async function updateCriteriaLastRunAt(criteriaId: string): Promise<void> {
+  const { error } = await supabase
+    .from('buyer_criteria')
+    .update({
+      last_run_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', criteriaId);
+
+  if (error) throw error;
+}
+
+/**
+ * Update last_run_at for multiple criteria in a batch.
+ */
+export async function updateCriteriaLastRunAtBatch(criteriaIds: string[]): Promise<void> {
+  if (criteriaIds.length === 0) return;
+
+  const { error } = await supabase
+    .from('buyer_criteria')
+    .update({
+      last_run_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .in('id', criteriaIds);
+
+  if (error) throw error;
+}
