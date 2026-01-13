@@ -949,6 +949,10 @@ export default function BuyerDetailPage() {
               if (event.step === 'debug_typesense_query') {
                 icon = "🔍"; title = "Typesense Query";
                 bgColor = "bg-blue-50"; borderColor = "border-blue-200";
+              } else if (event.step === 'debug_typesense_response') {
+                const found = ((event.data as { rawResponse?: { found?: number } }).rawResponse?.found) || 0;
+                icon = "📊"; title = `Typesense Response (${found} total matches)`;
+                bgColor = "bg-cyan-50"; borderColor = "border-cyan-200";
               } else if (event.step === 'found_listings') {
                 icon = "📦"; title = `Found ${(event.data as { count?: number }).count || 0} Listings`;
                 bgColor = "bg-green-50"; borderColor = "border-green-200";
@@ -985,18 +989,92 @@ export default function BuyerDetailPage() {
                   </button>
                   {isExpanded && (
                     <div className="px-4 pb-4 border-t border-inherit">
-                      {event.step === 'found_listings' && (event.data as { listings?: unknown[] }).listings && (
-                        <div className="mt-3 grid gap-2">
-                          {((event.data as { listings: Array<{ id: string; data: Record<string, unknown> }> }).listings).map((listing, i) => (
-                            <div key={i} className="bg-white p-3 rounded border text-sm">
-                              <div className="font-medium">{String(listing.data.property_type || '')} - {String(listing.data.location_raw || 'Unknown')}</div>
-                              <div className="text-gray-600 text-xs mt-1">
-                                {listing.data.bedrooms ? `${String(listing.data.bedrooms)} BR • ` : null}
-                                {listing.data.price_aed ? `AED ${Number(listing.data.price_aed).toLocaleString()}` : null}
+                      {/* Typesense Raw Response */}
+                      {event.step === 'debug_typesense_response' && (
+                        <div className="mt-3 space-y-3">
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            {[
+                              { label: 'Total Found', value: ((event.data as { rawResponse?: { found?: number } }).rawResponse?.found) || 0, color: 'bg-cyan-100 text-cyan-800' },
+                              { label: 'Out Of', value: ((event.data as { rawResponse?: { out_of?: number } }).rawResponse?.out_of) || 0, color: 'bg-gray-100 text-gray-700' },
+                              { label: 'Page', value: ((event.data as { rawResponse?: { page?: number } }).rawResponse?.page) || 1, color: 'bg-gray-100 text-gray-700' },
+                              { label: 'Search Time', value: `${((event.data as { rawResponse?: { search_time_ms?: number } }).rawResponse?.search_time_ms) || 0}ms`, color: 'bg-emerald-100 text-emerald-800' },
+                            ].map((stat) => (
+                              <div key={stat.label} className={`${stat.color} p-3 rounded-lg text-center`}>
+                                <div className="text-2xl font-bold">{stat.value}</div>
+                                <div className="text-xs opacity-75">{stat.label}</div>
                               </div>
-                              {listing.data.message_body_clean ? (
-                                <p className="text-xs text-gray-500 mt-2 line-clamp-2">{String(listing.data.message_body_clean).substring(0, 200)}...</p>
-                              ) : null}
+                            ))}
+                          </div>
+                          {(event.data as { rawResponse?: { request_params?: object } }).rawResponse?.request_params && (
+                            <div>
+                              <p className="text-sm font-medium mb-1">Request Parameters:</p>
+                              <pre className="bg-gray-900 text-green-400 p-3 rounded text-xs whitespace-pre-wrap font-mono max-h-48 overflow-auto">
+                                {JSON.stringify((event.data as { rawResponse?: { request_params?: object } }).rawResponse?.request_params, null, 2)}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {/* Found Listings - Enhanced Cards */}
+                      {event.step === 'found_listings' && (event.data as { listings?: unknown[] }).listings && (
+                        <div className="mt-3 grid gap-3 md:grid-cols-2">
+                          {((event.data as { listings: Array<{ id: string; data: Record<string, unknown>; highlights?: Array<{ field: string; snippet: string }> }> }).listings).map((listing, i) => (
+                            <div key={i} className="bg-white rounded-lg border shadow-sm overflow-hidden hover:shadow-md transition-shadow">
+                              {/* Card Header */}
+                              <div className="bg-gradient-to-r from-green-500 to-emerald-600 px-4 py-2 text-white">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-semibold text-sm">
+                                    {String(listing.data.property_type || 'Property').charAt(0).toUpperCase() + String(listing.data.property_type || 'Property').slice(1)}
+                                  </span>
+                                  {listing.data.bedrooms ? (
+                                    <Badge className="bg-white/20 text-white border-0 text-xs">
+                                      {String(listing.data.bedrooms)} BR
+                                    </Badge>
+                                  ) : null}
+                                </div>
+                              </div>
+                              {/* Card Body */}
+                              <div className="p-4 space-y-3">
+                                {/* Location */}
+                                <div className="flex items-start gap-2">
+                                  <span className="text-gray-400">📍</span>
+                                  <span className="text-sm font-medium text-gray-800">
+                                    {String(listing.data.location_raw || listing.data.community || 'Unknown Location')}
+                                  </span>
+                                </div>
+                                {/* Price & Area */}
+                                <div className="flex items-center gap-4">
+                                  {listing.data.price_aed ? (
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-green-600 font-bold">
+                                        AED {Number(listing.data.price_aed).toLocaleString()}
+                                      </span>
+                                    </div>
+                                  ) : null}
+                                  {listing.data.area_sqft ? (
+                                    <div className="text-gray-500 text-sm">
+                                      {Number(listing.data.area_sqft).toLocaleString()} sqft
+                                    </div>
+                                  ) : null}
+                                </div>
+                                {/* Tags */}
+                                <div className="flex flex-wrap gap-1.5">
+                                  {listing.data.is_off_plan ? <Badge variant="outline" className="text-xs bg-purple-50 text-purple-700 border-purple-200">Off-Plan</Badge> : null}
+                                  {listing.data.is_distressed_deal ? <Badge variant="outline" className="text-xs bg-red-50 text-red-700 border-red-200">Below Market</Badge> : null}
+                                  {listing.data.is_urgent ? <Badge variant="outline" className="text-xs bg-orange-50 text-orange-700 border-orange-200">Urgent</Badge> : null}
+                                  {listing.data.furnishing ? <Badge variant="outline" className="text-xs">{String(listing.data.furnishing)}</Badge> : null}
+                                </div>
+                                {/* Description Preview */}
+                                {listing.data.message_body_clean ? (
+                                  <p className="text-xs text-gray-500 line-clamp-2 border-t pt-2 mt-2">
+                                    {String(listing.data.message_body_clean).substring(0, 150)}...
+                                  </p>
+                                ) : null}
+                                {/* Listing ID */}
+                                <div className="text-xs text-gray-400 font-mono pt-1">
+                                  ID: {listing.id}
+                                </div>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -1030,7 +1108,7 @@ export default function BuyerDetailPage() {
                           </div>
                         </div>
                       )}
-                      {!['found_listings', 'debug_gemini_request', 'debug_gemini_response'].includes(event.step) && (
+                      {!['found_listings', 'debug_typesense_response', 'debug_gemini_request', 'debug_gemini_response'].includes(event.step) && (
                         <pre className="mt-3 bg-gray-900 text-green-400 p-3 rounded text-xs whitespace-pre-wrap font-mono max-h-64 overflow-auto">{JSON.stringify(event.data, null, 2)}</pre>
                       )}
                     </div>
