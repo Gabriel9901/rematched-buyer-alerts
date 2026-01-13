@@ -35,31 +35,8 @@ interface SelectedLocation {
   address: string;
 }
 
-// Default qualification prompt template
-const DEFAULT_QUALIFICATION_PROMPT = `You are a real estate matching assistant. Analyze how well this property listing matches the buyer's requirements.
-
-BUYER REQUIREMENTS:
-{requirements}
-
-PROPERTY LISTING:
-{listing}
-
-Evaluate the match and respond with ONLY a JSON object in this exact format:
-{
-  "score": <number 0-100>,
-  "explanation": "<brief 1-2 sentence summary>",
-  "highlights": ["<matching point 1>", "<matching point 2>"],
-  "concerns": ["<potential issue 1>", "<potential issue 2>"]
-}
-
-Scoring guide:
-- 90-100: Perfect match on all criteria
-- 70-89: Good match, minor deviations
-- 50-69: Partial match, some criteria not met
-- 30-49: Weak match, significant mismatches
-- 0-29: Poor match, most criteria not met
-
-Be strict but fair. Only include real highlights and concerns.`;
+// Import placeholder documentation from the prompt template module
+import { PLACEHOLDER_DOCS, DEFAULT_SYSTEM_PROMPT } from '@/lib/gemini/promptTemplate';
 
 const PROPERTY_TYPES = [
   "apartment",
@@ -107,6 +84,9 @@ export default function BuyerDetailPage() {
   const [expandedDebugPanels, setExpandedDebugPanels] = useState<Set<number>>(new Set());
   const [showPromptEditor, setShowPromptEditor] = useState(false);
   const [qualificationPrompt, setQualificationPrompt] = useState<string>("");
+  const [isCustomPrompt, setIsCustomPrompt] = useState(false);
+  const [promptLoading, setPromptLoading] = useState(false);
+  const [showPlaceholderRef, setShowPlaceholderRef] = useState(false);
 
   // AbortController ref for cancelling in-flight searches
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -142,30 +122,92 @@ export default function BuyerDetailPage() {
     mortgage_or_cash: [] as string[],
   });
 
-  // Load qualification prompt from localStorage
-  useEffect(() => {
-    const savedPrompt = localStorage.getItem("qualification_prompt");
-    setQualificationPrompt(savedPrompt || DEFAULT_QUALIFICATION_PROMPT);
-  }, []);
+  // Load qualification prompt from API
+  const fetchBuyerPrompt = useCallback(async () => {
+    if (!buyerId) return;
+    setPromptLoading(true);
+    try {
+      const response = await fetch(`/api/buyers/${buyerId}/prompt`);
+      if (response.ok) {
+        const data = await response.json();
+        setQualificationPrompt(data.template);
+        setIsCustomPrompt(data.isCustom);
+      } else {
+        // Fallback to default
+        setQualificationPrompt(DEFAULT_SYSTEM_PROMPT);
+        setIsCustomPrompt(false);
+      }
+    } catch (error) {
+      console.error('Error fetching buyer prompt:', error);
+      setQualificationPrompt(DEFAULT_SYSTEM_PROMPT);
+      setIsCustomPrompt(false);
+    } finally {
+      setPromptLoading(false);
+    }
+  }, [buyerId]);
 
-  // Validate prompt has required placeholders
+  useEffect(() => {
+    fetchBuyerPrompt();
+  }, [fetchBuyerPrompt]);
+
+  // Validate prompt has at least one placeholder from each category
   const promptHasRequiredPlaceholders = (prompt: string) => {
-    return prompt.includes("{requirements}") && prompt.includes("{listing}");
+    const hasBuyerPlaceholder = PLACEHOLDER_DOCS.buyer_requirements.some(
+      (p) => prompt.includes(p.name)
+    );
+    const hasListingPlaceholder = PLACEHOLDER_DOCS.listing_data.some(
+      (p) => prompt.includes(p.name)
+    );
+    return hasBuyerPlaceholder && hasListingPlaceholder;
   };
 
-  // Save prompt to localStorage
-  const handleSavePrompt = () => {
+  // Save prompt to database
+  const handleSavePrompt = async () => {
     if (!promptHasRequiredPlaceholders(qualificationPrompt)) {
-      alert("The prompt must contain both {requirements} and {listing} placeholders!");
+      alert("The prompt must contain at least one buyer requirement placeholder and one listing data placeholder!");
       return;
     }
-    localStorage.setItem("qualification_prompt", qualificationPrompt);
-    setShowPromptEditor(false);
+
+    try {
+      const response = await fetch(`/api/buyers/${buyerId}/prompt`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template: qualificationPrompt }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        alert(`Failed to save prompt: ${error.error || 'Unknown error'}`);
+        return;
+      }
+
+      setIsCustomPrompt(true);
+      setShowPromptEditor(false);
+    } catch (error) {
+      console.error('Error saving prompt:', error);
+      alert('Failed to save prompt');
+    }
   };
 
-  // Reset prompt to default
-  const handleResetPrompt = () => {
-    setQualificationPrompt(DEFAULT_QUALIFICATION_PROMPT);
+  // Reset buyer to use default prompt
+  const handleResetPrompt = async () => {
+    if (!confirm('Reset this buyer to use the default system prompt?')) return;
+
+    try {
+      const response = await fetch(`/api/buyers/${buyerId}/prompt`, {
+        method: 'DELETE',
+      });
+
+      if (response.ok) {
+        // Refetch to get the default prompt
+        await fetchBuyerPrompt();
+      } else {
+        alert('Failed to reset prompt');
+      }
+    } catch (error) {
+      console.error('Error resetting prompt:', error);
+      alert('Failed to reset prompt');
+    }
   };
 
   const fetchBuyerData = useCallback(async () => {
@@ -344,7 +386,7 @@ export default function BuyerDetailPage() {
         body: JSON.stringify({
           buyerId,
           debugMode,
-          qualificationPrompt: qualificationPrompt !== DEFAULT_QUALIFICATION_PROMPT ? qualificationPrompt : undefined,
+          qualificationPrompt: qualificationPrompt !== DEFAULT_SYSTEM_PROMPT ? qualificationPrompt : undefined,
         }),
         signal: abortController.signal,
       });
@@ -693,47 +735,89 @@ export default function BuyerDetailPage() {
         <Card className="border-purple-200 bg-purple-50/50">
           <CardHeader className="pb-3">
             <CardTitle className="text-purple-900 flex items-center justify-between">
-              <span>⚙️ Qualification Prompt Template</span>
+              <div className="flex items-center gap-3">
+                <span>⚙️ AI System Prompt</span>
+                {promptLoading ? (
+                  <Badge variant="outline" className="animate-pulse">Loading...</Badge>
+                ) : isCustomPrompt ? (
+                  <Badge variant="default" className="bg-purple-600">Custom</Badge>
+                ) : (
+                  <Badge variant="secondary">Using Default</Badge>
+                )}
+              </div>
               <div className="flex gap-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleResetPrompt}
-                  className="text-purple-700 hover:text-purple-900"
-                >
-                  Reset to Default
-                </Button>
+                {isCustomPrompt && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleResetPrompt}
+                    className="text-purple-700 hover:text-purple-900"
+                  >
+                    Reset to Default
+                  </Button>
+                )}
               </div>
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="bg-yellow-100 border border-yellow-300 rounded-lg p-3 text-sm">
-              <p className="font-medium text-yellow-800 mb-2">⚠️ Required Placeholders</p>
-              <p className="text-yellow-700">
-                Your prompt <strong>must</strong> include these placeholders:
-              </p>
-              <ul className="list-disc ml-5 mt-1 text-yellow-700">
-                <li><code className="bg-yellow-200 px-1 rounded">{"{requirements}"}</code> - Will be replaced with buyer requirements</li>
-                <li><code className="bg-yellow-200 px-1 rounded">{"{listing}"}</code> - Will be replaced with listing details</li>
-              </ul>
+            {/* Placeholder Reference - Collapsible */}
+            <div className="border border-purple-200 rounded-lg overflow-hidden">
+              <button
+                onClick={() => setShowPlaceholderRef(!showPlaceholderRef)}
+                className="w-full px-4 py-3 bg-purple-100 flex items-center justify-between text-left hover:bg-purple-150"
+              >
+                <span className="font-medium text-purple-900">📝 Available Placeholders</span>
+                <span className="text-purple-600">{showPlaceholderRef ? '▼' : '▶'}</span>
+              </button>
+              {showPlaceholderRef && (
+                <div className="p-4 bg-white grid md:grid-cols-2 gap-4">
+                  <div>
+                    <h4 className="font-medium text-purple-900 mb-2">Buyer Requirements</h4>
+                    <div className="space-y-1 text-sm">
+                      {PLACEHOLDER_DOCS.buyer_requirements.map((p) => (
+                        <div key={p.name} className="flex gap-2">
+                          <code className="bg-purple-100 px-1 rounded text-purple-700 text-xs whitespace-nowrap">{p.name}</code>
+                          <span className="text-gray-600 text-xs">{p.description}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <h4 className="font-medium text-purple-900 mb-2">Listing Data</h4>
+                    <div className="space-y-1 text-sm">
+                      {PLACEHOLDER_DOCS.listing_data.map((p) => (
+                        <div key={p.name} className="flex gap-2">
+                          <code className="bg-blue-100 px-1 rounded text-blue-700 text-xs whitespace-nowrap">{p.name}</code>
+                          <span className="text-gray-600 text-xs">{p.description}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
+
+            {!promptHasRequiredPlaceholders(qualificationPrompt) && (
+              <div className="bg-red-100 border border-red-300 rounded-lg p-3 text-sm">
+                <p className="font-medium text-red-800 mb-1">⚠️ Missing Required Placeholders</p>
+                <p className="text-red-700">
+                  Your prompt must include at least one buyer requirement placeholder (e.g., <code className="bg-red-200 px-1 rounded">{"{search_name}"}</code>)
+                  and one listing placeholder (e.g., <code className="bg-red-200 px-1 rounded">{"{listing_type}"}</code>).
+                </p>
+              </div>
+            )}
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label>Prompt Template</Label>
-                <div className="flex gap-2">
-                  {!promptHasRequiredPlaceholders(qualificationPrompt) && (
-                    <Badge variant="destructive">Missing placeholders!</Badge>
-                  )}
-                  {qualificationPrompt !== DEFAULT_QUALIFICATION_PROMPT && (
-                    <Badge variant="secondary">Modified</Badge>
-                  )}
-                </div>
+                {!promptHasRequiredPlaceholders(qualificationPrompt) && (
+                  <Badge variant="destructive">Invalid template</Badge>
+                )}
               </div>
               <Textarea
                 value={qualificationPrompt}
                 onChange={(e) => setQualificationPrompt(e.target.value)}
-                rows={16}
+                rows={18}
                 className="font-mono text-sm bg-white"
                 placeholder="Enter your qualification prompt..."
               />
@@ -745,22 +829,26 @@ export default function BuyerDetailPage() {
                 disabled={!promptHasRequiredPlaceholders(qualificationPrompt)}
                 className="bg-purple-600 hover:bg-purple-700"
               >
-                Save Prompt
+                Save as Custom Prompt
               </Button>
               <Button
                 variant="outline"
-                onClick={() => setShowPromptEditor(false)}
+                onClick={() => {
+                  fetchBuyerPrompt();
+                  setShowPromptEditor(false);
+                }}
               >
                 Cancel
               </Button>
             </div>
 
-            <div className="text-xs text-gray-500">
-              <p className="font-medium mb-1">Tips:</p>
+            <div className="text-xs text-gray-500 bg-gray-50 rounded p-3">
+              <p className="font-medium mb-1">How it works:</p>
               <ul className="list-disc ml-4 space-y-1">
-                <li>The response must be valid JSON with score, explanation, highlights, and concerns</li>
-                <li>Adjust the scoring guide to match your specific criteria</li>
-                <li>Add custom instructions for how to evaluate specific property types</li>
+                <li>Placeholders like <code className="bg-gray-200 px-1 rounded">{"{search_name}"}</code> are replaced with actual buyer/listing data</li>
+                <li>Each buyer can have their own custom prompt, or use the global default</li>
+                <li>The AI must return valid JSON with score, explanation, highlights, and concerns</li>
+                <li>Use the criteria-specific <strong>AI Qualification Prompt</strong> field for per-search customizations</li>
               </ul>
             </div>
           </CardContent>

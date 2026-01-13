@@ -16,6 +16,8 @@ export interface BuyerRequirements {
   bathrooms?: number[];
   minPriceAed?: number;
   maxPriceAed?: number;
+  minAreaSqft?: number;
+  maxAreaSqft?: number;
   keywords?: string;
   additionalNotes?: string;
 }

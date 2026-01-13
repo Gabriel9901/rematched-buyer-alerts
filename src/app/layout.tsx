@@ -56,6 +56,12 @@ export default function RootLayout({
                   >
                     Matches
                   </Link>
+                  <Link
+                    href="/settings"
+                    className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-100 rounded-md"
+                  >
+                    Settings
+                  </Link>
                 </div>
               </div>
             </div>

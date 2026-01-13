@@ -8,8 +8,31 @@ export interface Buyer {
   id: string;
   name: string;
   slack_channel: string | null;
+  system_prompt: string | null; // Custom AI prompt for this buyer, uses default if null
   created_at: string;
   updated_at: string;
+}
+
+export interface AppSetting {
+  key: string;
+  value: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SystemPromptSetting {
+  template: string;
+  version: number;
+}
+
+export interface PlaceholderInfo {
+  name: string;
+  description: string;
+}
+
+export interface PlaceholderDocumentation {
+  buyer_requirements: PlaceholderInfo[];
+  listing_data: PlaceholderInfo[];
 }
 
 export interface BuyerCriteria {
