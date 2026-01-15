@@ -35,6 +35,13 @@ export interface PlaceholderDocumentation {
   listing_data: PlaceholderInfo[];
 }
 
+// Location data for storing full location objects (name + PSL code)
+export interface SelectedLocation {
+  name: string;
+  pslCode: string;
+  address: string;
+}
+
 export interface BuyerCriteria {
   id: string;
   buyer_id: string;
@@ -59,6 +66,9 @@ export interface BuyerCriteria {
 
   // Location filter using PSL codes from propsearch.ae
   psl_codes?: string[] | null;
+
+  // Full location data for UI display (stores name + pslCode + address)
+  location_data?: SelectedLocation[] | null;
 
   // Boolean filters - null means don't filter
   is_off_plan?: boolean | null;
