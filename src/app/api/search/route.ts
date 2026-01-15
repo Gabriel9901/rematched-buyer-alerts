@@ -12,7 +12,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSupabase } from '@/lib/supabase/client';
 import { buildSimpleSearchBody, Criteria } from '@/lib/typesense';
 import { typesenseMultiSearch } from '@/lib/typesense/client';
-import { qualifyMatches, BuyerRequirements } from '@/lib/gemini/qualify';
+import { qualifyMatchesBatched, BuyerRequirements } from '@/lib/gemini/qualify';
 import { BuyerCriteria } from '@/lib/supabase/types';
 import { TypesenseHit } from '@/lib/typesense/types';
 
@@ -249,15 +249,15 @@ export async function POST(request: NextRequest) {
           continue;
         }
 
-        // Qualify matches with Gemini
+        // Qualify matches with Gemini (batched - 50 listings per API call)
         const buyerRequirements = toBuyerRequirements(criteria);
-        const qualifiedMatches = await qualifyMatches(
+        const qualifiedMatches = await qualifyMatchesBatched(
           geminiKey,
           hits,
           buyerRequirements,
           {
             threshold: 60,
-            concurrency: 3,
+            batchSize: 50,
           }
         );
 

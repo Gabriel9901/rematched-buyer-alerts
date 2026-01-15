@@ -98,3 +98,68 @@ export async function callGeminiJson<T>(apiKey: string, prompt: string): Promise
     throw new GeminiError(`Failed to parse Gemini JSON response: ${text.substring(0, 200)}`);
   }
 }
+
+/**
+ * Extract complete JSON objects from a potentially truncated array response.
+ * Handles cases where Gemini's response is cut off mid-array.
+ */
+function extractCompleteJsonObjects(text: string): unknown[] {
+  // Pattern to match complete qualification result objects
+  const pattern = /\{\s*"listingIndex"\s*:\s*\d+\s*,\s*"score"\s*:\s*[\d.]+\s*,\s*"explanation"\s*:\s*"[^"]*(?:\\.[^"]*)*"\s*,\s*"highlights"\s*:\s*\[[^\]]*\]\s*,\s*"concerns"\s*:\s*\[[^\]]*\]\s*\}/g;
+
+  const matches = text.match(pattern);
+  if (!matches) {
+    return [];
+  }
+
+  const results: unknown[] = [];
+  for (const match of matches) {
+    try {
+      results.push(JSON.parse(match));
+    } catch {
+      // Skip malformed objects
+    }
+  }
+  return results;
+}
+
+/**
+ * Call Gemini with a batch prompt expecting JSON array response.
+ * Handles large responses and truncated JSON gracefully.
+ *
+ * @param apiKey - Gemini API key
+ * @param prompt - The batch prompt (should instruct to return JSON array)
+ * @returns Parsed JSON array
+ */
+export async function callGeminiBatchJson<T>(apiKey: string, prompt: string): Promise<T[]> {
+  const text = await callGemini(apiKey, prompt);
+
+  // Extract JSON from response (handle markdown code blocks)
+  let jsonStr = text;
+  const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (jsonMatch) {
+    jsonStr = jsonMatch[1].trim();
+  }
+
+  // Try to parse as complete JSON array first
+  try {
+    const parsed = JSON.parse(jsonStr);
+    if (Array.isArray(parsed)) {
+      return parsed as T[];
+    }
+    // Handle case where response is wrapped in an object
+    if (parsed.results && Array.isArray(parsed.results)) {
+      return parsed.results as T[];
+    }
+    throw new Error('Response is not an array');
+  } catch {
+    // If full parse fails, try to extract complete objects from truncated response
+    console.warn('Full JSON parse failed, attempting to extract complete objects');
+    const extracted = extractCompleteJsonObjects(text) as T[];
+    if (extracted.length > 0) {
+      console.log(`Extracted ${extracted.length} complete objects from truncated response`);
+      return extracted;
+    }
+    throw new GeminiError(`Failed to parse batch Gemini JSON response: ${text.substring(0, 500)}`);
+  }
+}

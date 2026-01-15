@@ -15,10 +15,13 @@ import { typesenseMultiSearch } from '@/lib/typesense/client';
 import { BuyerRequirements } from '@/lib/gemini/qualify';
 import { BuyerCriteria, SystemPromptSetting, Buyer } from '@/lib/supabase/types';
 import { TypesenseHit } from '@/lib/typesense/types';
-import { buildPromptFromTemplate, DEFAULT_SYSTEM_PROMPT } from '@/lib/gemini/promptTemplate';
+import { DEFAULT_SYSTEM_PROMPT } from '@/lib/gemini/promptTemplate';
 
 // Gemini API URL
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent';
+
+// Default batch size for Gemini qualification
+const BATCH_SIZE = 50;
 
 interface SearchResults {
   totalSearches: number;
@@ -132,17 +135,154 @@ function toBuyerRequirements(dbCriteria: BuyerCriteria): BuyerRequirements {
   };
 }
 
-// Build Gemini prompt for a listing using the granular template system
-function buildGeminiPrompt(listing: TypesenseHit, requirements: BuyerRequirements, promptTemplate: string): string {
-  // Use the new granular template system
-  return buildPromptFromTemplate(promptTemplate, requirements, listing);
+/**
+ * Format buyer requirements for the batch prompt
+ */
+function formatRequirementsForBatch(req: BuyerRequirements): string {
+  const lines: string[] = [`Search: "${req.name}"`];
+
+  if (req.propertyTypes?.length) {
+    lines.push(`Property types: ${req.propertyTypes.join(', ')}`);
+  }
+  if (req.communities?.length) {
+    lines.push(`Communities: ${req.communities.join(', ')}`);
+  }
+  if (req.developers?.length) {
+    lines.push(`Developers: ${req.developers.join(', ')}`);
+  }
+  if (req.bedrooms?.length) {
+    lines.push(`Bedrooms: ${req.bedrooms.join(', ')}`);
+  }
+  if (req.bathrooms?.length) {
+    lines.push(`Bathrooms: ${req.bathrooms.join(', ')}`);
+  }
+  if (req.minPriceAed !== undefined || req.maxPriceAed !== undefined) {
+    const min = req.minPriceAed ? `AED ${req.minPriceAed.toLocaleString()}` : 'any';
+    const max = req.maxPriceAed ? `AED ${req.maxPriceAed.toLocaleString()}` : 'any';
+    lines.push(`Price range: ${min} - ${max}`);
+  }
+  if (req.keywords) {
+    lines.push(`Keywords: ${req.keywords}`);
+  }
+  if (req.additionalNotes) {
+    lines.push(`\nIMPORTANT QUALIFICATION CRITERIA:\n${req.additionalNotes}`);
+  }
+
+  return lines.join('\n');
 }
 
-// Call Gemini API and return both request and response
-async function callGeminiWithDebug(apiKey: string, prompt: string): Promise<{
+/**
+ * Format multiple listings for batch qualification prompt
+ */
+function formatListingsForBatch(hits: TypesenseHit[]): string {
+  return hits
+    .map((hit, index) => {
+      const listingNum = index + 1;
+      const doc = hit.document;
+      const data = doc.data;
+
+      const lines: string[] = [
+        `=== LISTING ${listingNum} ===`,
+        `Type: ${data.property_type}`,
+        `Transaction: ${data.transaction_type}`,
+        `Location: ${data.community || data.location_raw || 'Not specified'}`,
+      ];
+
+      if (data.developer) lines.push(`Developer: ${data.developer}`);
+      if (data.bedrooms !== undefined) lines.push(`Bedrooms: ${data.bedrooms}`);
+      if (data.bathrooms !== undefined) lines.push(`Bathrooms: ${data.bathrooms}`);
+      if (data.price_aed) lines.push(`Price: AED ${data.price_aed.toLocaleString()}`);
+      if (data.area_sqft) lines.push(`Area: ${data.area_sqft} sqft`);
+      if (data.furnishing) lines.push(`Furnishing: ${data.furnishing}`);
+      if (data.is_off_plan) lines.push(`Off-plan: Yes`);
+      if (data.is_urgent) lines.push(`Urgent: Yes`);
+      if (data.message_body_clean) {
+        const desc =
+          data.message_body_clean.length > 500
+            ? data.message_body_clean.substring(0, 500) + '...'
+            : data.message_body_clean;
+        lines.push(`Description: ${desc}`);
+      }
+      if (data.other_details) {
+        lines.push(`Details: ${data.other_details}`);
+      }
+
+      return lines.join('\n');
+    })
+    .join('\n\n');
+}
+
+/**
+ * Build batch qualification prompt
+ */
+function buildBatchPrompt(requirements: BuyerRequirements, listings: TypesenseHit[]): string {
+  return `You are a real estate matching assistant. Analyze how well each of the following property listings matches the buyer's requirements.
+
+BUYER REQUIREMENTS:
+${formatRequirementsForBatch(requirements)}
+
+PROPERTY LISTINGS TO EVALUATE:
+${formatListingsForBatch(listings)}
+
+For EACH listing above, evaluate the match and respond with ONLY a JSON array containing one object per listing in this exact format:
+[
+  {
+    "listingIndex": <the listing number>,
+    "score": <number 0-100>,
+    "explanation": "<brief 1-2 sentence summary>",
+    "highlights": ["<matching point 1>", "<matching point 2>"],
+    "concerns": ["<potential issue 1>", "<potential issue 2>"]
+  },
+  ...
+]
+
+IMPORTANT: Include ALL listings in your response, in order. Do not skip any listing.
+
+Scoring guide:
+- 90-100: Perfect match on all criteria
+- 70-89: Good match, minor deviations
+- 50-69: Partial match, some criteria not met
+- 30-49: Weak match, significant mismatches
+- 0-29: Poor match, most criteria not met
+
+Be strict but fair. Only include real highlights and concerns.`;
+}
+
+interface BatchQualificationResult {
+  listingIndex: number;
+  score: number;
+  explanation: string;
+  highlights: string[];
+  concerns: string[];
+}
+
+/**
+ * Extract complete JSON objects from a potentially truncated array response.
+ */
+function extractCompleteJsonObjects(text: string): BatchQualificationResult[] {
+  const pattern = /\{\s*"listingIndex"\s*:\s*\d+\s*,\s*"score"\s*:\s*[\d.]+\s*,\s*"explanation"\s*:\s*"[^"]*(?:\\.[^"]*)*"\s*,\s*"highlights"\s*:\s*\[[^\]]*\]\s*,\s*"concerns"\s*:\s*\[[^\]]*\]\s*\}/g;
+
+  const matches = text.match(pattern);
+  if (!matches) {
+    return [];
+  }
+
+  const results: BatchQualificationResult[] = [];
+  for (const match of matches) {
+    try {
+      results.push(JSON.parse(match));
+    } catch {
+      // Skip malformed objects
+    }
+  }
+  return results;
+}
+
+// Call Gemini API with batch prompt and return both request and response for debug
+async function callGeminiBatchWithDebug(apiKey: string, prompt: string): Promise<{
   request: object;
   response: object;
-  parsed: { score: number; explanation: string; highlights: string[]; concerns: string[] };
+  parsed: BatchQualificationResult[];
 }> {
   const requestBody = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -168,24 +308,42 @@ async function callGeminiWithDebug(apiKey: string, prompt: string): Promise<{
     throw new Error('No text in Gemini response');
   }
 
-  // Extract JSON from response
+  // Extract JSON from response (handle markdown code blocks)
   let jsonStr = text;
   const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (jsonMatch) {
     jsonStr = jsonMatch[1].trim();
   }
 
-  const parsed = JSON.parse(jsonStr);
+  // Try to parse as complete JSON array first
+  let parsed: BatchQualificationResult[];
+  try {
+    const fullParsed = JSON.parse(jsonStr);
+    if (Array.isArray(fullParsed)) {
+      parsed = fullParsed;
+    } else if (fullParsed.results && Array.isArray(fullParsed.results)) {
+      parsed = fullParsed.results;
+    } else {
+      throw new Error('Response is not an array');
+    }
+  } catch {
+    // If full parse fails, extract complete objects
+    console.warn('Full JSON parse failed, extracting complete objects');
+    parsed = extractCompleteJsonObjects(text);
+  }
+
+  // Normalize scores
+  parsed = parsed.map((item) => ({
+    ...item,
+    score: Math.max(0, Math.min(100, item.score)),
+    highlights: item.highlights || [],
+    concerns: item.concerns || [],
+  }));
 
   return {
     request: requestBody,
     response: responseData,
-    parsed: {
-      score: Math.max(0, Math.min(100, parsed.score)),
-      explanation: parsed.explanation,
-      highlights: parsed.highlights || [],
-      concerns: parsed.concerns || [],
-    },
+    parsed,
   };
 }
 
@@ -444,28 +602,36 @@ export async function POST(request: NextRequest) {
               continue;
             }
 
-            // Step 3: Qualify with Gemini (in parallel batches to avoid timeouts)
+            // Step 3: Qualify with Gemini (batched - 50 listings per API call)
             const buyerRequirements = toBuyerRequirements(criteria);
 
             // Determine which prompt template to use:
             // 1. UI-provided custom prompt (highest priority)
             // 2. Buyer's custom system_prompt
             // 3. Default system prompt from app_settings
+            // Note: For batched processing, we use the requirements directly in the prompt
             const buyer = criteria.buyer as Buyer | null;
-            const activePrompt = customPromptFromUI || buyer?.system_prompt || defaultSystemPrompt;
+            const promptSource = customPromptFromUI
+              ? 'UI (custom)'
+              : buyer?.system_prompt
+                ? 'Buyer-specific'
+                : 'Default';
+
+            // If there's a custom AI prompt, include it in the requirements
+            if (customPromptFromUI) {
+              buyerRequirements.additionalNotes = customPromptFromUI;
+            } else if (buyer?.system_prompt) {
+              // Extract any custom instructions from buyer's system prompt
+              buyerRequirements.additionalNotes = buyer.system_prompt;
+            }
 
             // Debug: Log which prompt source is being used
             if (debugMode) {
-              const promptSource = customPromptFromUI
-                ? 'UI (custom)'
-                : buyer?.system_prompt
-                  ? 'Buyer-specific'
-                  : 'Default';
               sendEvent({
                 step: 'debug_prompt_source',
                 criteriaName,
                 promptSource,
-                promptLength: activePrompt.length,
+                batchSize: BATCH_SIZE,
               });
             }
 
@@ -474,7 +640,6 @@ export async function POST(request: NextRequest) {
               qualification: { score: number; isMatch: boolean; explanation: string; highlights: string[]; concerns: string[] };
             }> = [];
 
-            const BATCH_SIZE = 5; // Process 5 listings in parallel
             const totalBatches = Math.ceil(hits.length / BATCH_SIZE);
 
             for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
@@ -496,104 +661,164 @@ export async function POST(request: NextRequest) {
                 batchStart: batchStart + 1,
                 batchEnd,
                 total: hits.length,
+                listingsInBatch: batch.length,
               });
 
-              // Process batch in parallel
-              const batchPromises = batch.map(async (listing, indexInBatch) => {
-                const globalIndex = batchStart + indexInBatch;
-                const prompt = buildGeminiPrompt(listing, buyerRequirements, activePrompt);
+              // Build batch prompt
+              const batchPrompt = buildBatchPrompt(buyerRequirements, batch);
 
-                // Debug: Send the Gemini request before making the call
+              // Debug: Send the batch Gemini request before making the call
+              if (debugMode) {
+                sendEvent({
+                  step: 'debug_gemini_batch_request',
+                  criteriaName,
+                  batchNumber: batchIndex + 1,
+                  listingCount: batch.length,
+                  prompt: batchPrompt,
+                  listingSummaries: batch.map((listing, idx) => ({
+                    index: idx + 1,
+                    id: listing.document.id,
+                    type: listing.document.data.property_type,
+                    location: listing.document.data.location_raw || listing.document.data.community,
+                    price: listing.document.data.price_aed,
+                    bedrooms: listing.document.data.bedrooms,
+                  })),
+                });
+              }
+
+              try {
+                const geminiResult = await callGeminiBatchWithDebug(geminiKey, batchPrompt);
+
+                // Debug: Send raw Gemini batch response
                 if (debugMode) {
                   sendEvent({
-                    step: 'debug_gemini_request',
+                    step: 'debug_gemini_batch_response',
                     criteriaName,
-                    listingIndex: globalIndex + 1,
-                    listingId: listing.document.id,
-                    prompt: prompt,
-                    listingSummary: {
-                      type: listing.document.data.property_type,
-                      location: listing.document.data.location_raw || listing.document.data.community,
-                      price: listing.document.data.price_aed,
-                      bedrooms: listing.document.data.bedrooms,
-                    },
+                    batchNumber: batchIndex + 1,
+                    rawResponse: geminiResult.response,
+                    parsedResultCount: geminiResult.parsed.length,
+                    parsedResults: geminiResult.parsed,
                   });
                 }
 
-                try {
-                  const geminiResult = await callGeminiWithDebug(geminiKey, prompt);
+                // Create a map for quick lookup by listingIndex
+                const resultMap = new Map<number, BatchQualificationResult>();
+                for (const result of geminiResult.parsed) {
+                  resultMap.set(result.listingIndex, result);
+                }
 
-                  // Debug: Send raw Gemini response
-                  if (debugMode) {
+                // Map results back to listings
+                for (let i = 0; i < batch.length; i++) {
+                  const listingIndex = i + 1; // 1-based index within batch
+                  const listing = batch[i];
+                  const qualResult = resultMap.get(listingIndex);
+                  const globalIndex = batchStart + i;
+
+                  if (qualResult) {
+                    const score = Math.max(0, Math.min(100, qualResult.score));
+                    const isMatch = score >= 60;
+
+                    qualifiedMatches.push({
+                      listing,
+                      qualification: {
+                        score,
+                        isMatch,
+                        explanation: qualResult.explanation || '',
+                        highlights: qualResult.highlights || [],
+                        concerns: qualResult.concerns || [],
+                      },
+                    });
+
+                    // Send individual qualification result
                     sendEvent({
-                      step: 'debug_gemini_response',
+                      step: 'qualified',
                       criteriaName,
-                      listingIndex: globalIndex + 1,
-                      listingId: listing.document.id,
-                      rawResponse: geminiResult.response,
-                      parsedResult: geminiResult.parsed,
+                      current: globalIndex + 1,
+                      total: hits.length,
+                      score,
+                      isMatch,
+                      ...(debugMode && {
+                        explanation: qualResult.explanation,
+                        highlights: qualResult.highlights,
+                        concerns: qualResult.concerns,
+                      }),
+                    });
+                  } else {
+                    // Missing result for this listing
+                    console.warn(`Missing qualification result for listing index ${listingIndex} in batch ${batchIndex + 1}`);
+                    qualifiedMatches.push({
+                      listing,
+                      qualification: {
+                        score: 0,
+                        isMatch: false,
+                        explanation: 'Qualification result missing from batch response',
+                        highlights: [],
+                        concerns: ['Missing from batch response'],
+                      },
+                    });
+
+                    sendEvent({
+                      step: 'qualified',
+                      criteriaName,
+                      current: globalIndex + 1,
+                      total: hits.length,
+                      score: 0,
+                      isMatch: false,
+                      ...(debugMode && {
+                        explanation: 'Qualification result missing from batch response',
+                        highlights: [],
+                        concerns: ['Missing from batch response'],
+                      }),
                     });
                   }
+                }
+              } catch (error) {
+                console.error(`Batch ${batchIndex + 1} failed:`, error);
 
-                  const isMatch = geminiResult.parsed.score >= 60;
+                if (debugMode) {
+                  sendEvent({
+                    step: 'debug_gemini_batch_error',
+                    criteriaName,
+                    batchNumber: batchIndex + 1,
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                  });
+                }
+
+                // Mark all listings in batch as failed
+                for (let i = 0; i < batch.length; i++) {
+                  const listing = batch[i];
+                  const globalIndex = batchStart + i;
+
+                  qualifiedMatches.push({
+                    listing,
+                    qualification: {
+                      score: 0,
+                      isMatch: false,
+                      explanation: 'Batch qualification failed due to an error',
+                      highlights: [],
+                      concerns: ['Batch qualification failed'],
+                    },
+                  });
 
                   sendEvent({
                     step: 'qualified',
                     criteriaName,
                     current: globalIndex + 1,
                     total: hits.length,
-                    score: geminiResult.parsed.score,
-                    isMatch,
+                    score: 0,
+                    isMatch: false,
                     ...(debugMode && {
-                      explanation: geminiResult.parsed.explanation,
-                      highlights: geminiResult.parsed.highlights,
-                      concerns: geminiResult.parsed.concerns,
+                      explanation: 'Batch qualification failed due to an error',
+                      highlights: [],
+                      concerns: ['Batch qualification failed'],
                     }),
                   });
-
-                  return {
-                    listing,
-                    qualification: {
-                      score: geminiResult.parsed.score,
-                      isMatch,
-                      explanation: geminiResult.parsed.explanation,
-                      highlights: geminiResult.parsed.highlights,
-                      concerns: geminiResult.parsed.concerns,
-                    },
-                  };
-                } catch (error) {
-                  console.error(`Failed to qualify listing ${listing.document.id}:`, error);
-
-                  if (debugMode) {
-                    sendEvent({
-                      step: 'debug_gemini_error',
-                      criteriaName,
-                      listingIndex: globalIndex + 1,
-                      listingId: listing.document.id,
-                      error: error instanceof Error ? error.message : 'Unknown error',
-                    });
-                  }
-
-                  return {
-                    listing,
-                    qualification: {
-                      score: 0,
-                      isMatch: false,
-                      explanation: 'Failed to qualify due to an error',
-                      highlights: [],
-                      concerns: ['Qualification failed'],
-                    },
-                  };
                 }
-              });
-
-              // Wait for all batch promises to complete
-              const batchResults = await Promise.all(batchPromises);
-              qualifiedMatches.push(...batchResults);
+              }
 
               // Delay between batches (not after last batch)
               if (batchIndex < totalBatches - 1) {
-                await new Promise((resolve) => setTimeout(resolve, 500));
+                await new Promise((resolve) => setTimeout(resolve, 200));
               }
             }
 
