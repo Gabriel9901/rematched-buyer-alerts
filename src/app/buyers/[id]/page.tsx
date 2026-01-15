@@ -26,15 +26,11 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase/client";
-import { Buyer, BuyerCriteria, Match } from "@/lib/supabase/types";
+import { Buyer, BuyerCriteria, Match, SelectedLocation } from "@/lib/supabase/types";
 import { LocationSearch } from "@/components/LocationSearch";
+import { FormattedNumberInput } from "@/components/FormattedNumberInput";
+import { KeywordChipsInput } from "@/components/KeywordChipsInput";
 import { TimeRangeDialog, TimeRangeSelection } from "@/components/TimeRangeDialog";
-
-interface SelectedLocation {
-  name: string;
-  pslCode: string;
-  address: string;
-}
 
 // Import placeholder documentation from the prompt template module
 import { PLACEHOLDER_DOCS, DEFAULT_SYSTEM_PROMPT } from '@/lib/gemini/promptTemplate';
@@ -99,7 +95,6 @@ export default function BuyerDetailPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [selectedLocations, setSelectedLocations] = useState<SelectedLocation[]>([]);
   const [criteriaForm, setCriteriaForm] = useState({
-    name: "",
     transaction_type: "sale",
     property_types: [] as string[],
     communities: [] as string[],
@@ -108,7 +103,7 @@ export default function BuyerDetailPage() {
     max_price_aed: "",
     min_area_sqft: "",
     max_area_sqft: "",
-    keywords: "",
+    keywords: [] as string[],
     ai_prompt: "",
     // Boolean filters
     is_off_plan: null as boolean | null,
@@ -281,7 +276,8 @@ export default function BuyerDetailPage() {
     try {
       const criteriaData = {
         buyer_id: buyerId,
-        name: criteriaForm.name,
+        // Auto-generate name from filters
+        name: generateSearchName(),
         kind: "listing",
         transaction_type: criteriaForm.transaction_type,
         property_types:
@@ -297,6 +293,9 @@ export default function BuyerDetailPage() {
           selectedLocations.length > 0
             ? selectedLocations.map((loc) => loc.pslCode)
             : null,
+        // Full location data for UI display (name + pslCode + address)
+        location_data:
+          selectedLocations.length > 0 ? selectedLocations : null,
         bedrooms: criteriaForm.bedrooms
           ? criteriaForm.bedrooms.split(",").map((b) => parseInt(b.trim()))
           : null,
@@ -313,7 +312,11 @@ export default function BuyerDetailPage() {
         max_area_sqft: criteriaForm.max_area_sqft
           ? parseInt(criteriaForm.max_area_sqft)
           : null,
-        keywords: criteriaForm.keywords || null,
+        // Convert keywords array to comma-separated string for DB storage
+        keywords:
+          criteriaForm.keywords.length > 0
+            ? criteriaForm.keywords.join(", ")
+            : null,
         // AI prompt for Gemini qualification
         ai_prompt: criteriaForm.ai_prompt || null,
         // Boolean filters
@@ -600,7 +603,6 @@ export default function BuyerDetailPage() {
 
   const resetForm = () => {
     setCriteriaForm({
-      name: "",
       transaction_type: "sale",
       property_types: [],
       communities: [],
@@ -609,7 +611,7 @@ export default function BuyerDetailPage() {
       max_price_aed: "",
       min_area_sqft: "",
       max_area_sqft: "",
-      keywords: "",
+      keywords: [],
       ai_prompt: "",
       is_off_plan: null,
       is_distressed_deal: null,
@@ -627,10 +629,54 @@ export default function BuyerDetailPage() {
     setEditingCriteriaId(null);
   };
 
+  // Auto-generate search name from selected filters
+  const generateSearchName = useCallback(() => {
+    const parts: string[] = [];
+
+    // Bedrooms
+    if (criteriaForm.bedrooms) {
+      const beds = criteriaForm.bedrooms
+        .split(",")
+        .map((b) => parseInt(b.trim()))
+        .filter((b) => !isNaN(b));
+      if (beds.length === 1) {
+        parts.push(beds[0] === 0 ? "Studio" : `${beds[0]}BR`);
+      } else if (beds.length > 1) {
+        const min = Math.min(...beds);
+        const max = Math.max(...beds);
+        parts.push(min === max ? `${min}BR` : `${min}-${max}BR`);
+      }
+    }
+
+    // Location (first location name or "Multi-Area")
+    if (selectedLocations.length === 1) {
+      // Use first word of location name for brevity
+      const locationName = selectedLocations[0].name.split(" ")[0];
+      parts.push(locationName);
+    } else if (selectedLocations.length > 1) {
+      parts.push("Multi-Area");
+    }
+
+    // Transaction type
+    parts.push(criteriaForm.transaction_type === "rent" ? "Rent" : "Sale");
+
+    // Property type (if single)
+    if (criteriaForm.property_types.length === 1) {
+      const type = criteriaForm.property_types[0];
+      parts.push(type.charAt(0).toUpperCase() + type.slice(1));
+    }
+
+    // Off-plan flag
+    if (criteriaForm.is_off_plan === true) {
+      parts.push("Off-plan");
+    }
+
+    return parts.join(" ") || "New Search";
+  }, [criteriaForm, selectedLocations]);
+
   const handleEditCriteria = (criteriaToEdit: CriteriaWithMatches) => {
     // Populate form with existing criteria data
     setCriteriaForm({
-      name: criteriaToEdit.name,
       transaction_type: criteriaToEdit.transaction_type,
       property_types: criteriaToEdit.property_types || [],
       communities: criteriaToEdit.communities || [],
@@ -639,7 +685,10 @@ export default function BuyerDetailPage() {
       max_price_aed: criteriaToEdit.max_price_aed?.toString() || "",
       min_area_sqft: criteriaToEdit.min_area_sqft?.toString() || "",
       max_area_sqft: criteriaToEdit.max_area_sqft?.toString() || "",
-      keywords: criteriaToEdit.keywords || "",
+      // Parse keywords string to array
+      keywords: criteriaToEdit.keywords
+        ? criteriaToEdit.keywords.split(",").map((k) => k.trim()).filter(Boolean)
+        : [],
       ai_prompt: criteriaToEdit.ai_prompt || "",
       is_off_plan: criteriaToEdit.is_off_plan ?? null,
       is_distressed_deal: criteriaToEdit.is_distressed_deal ?? null,
@@ -654,12 +703,14 @@ export default function BuyerDetailPage() {
       mortgage_or_cash: criteriaToEdit.mortgage_or_cash || [],
     });
 
-    // Populate selected locations from PSL codes
-    // Note: We only have PSL codes, not full location data, so we create minimal objects
-    if (criteriaToEdit.psl_codes && criteriaToEdit.psl_codes.length > 0) {
+    // Populate selected locations - prefer location_data (has names), fallback to psl_codes
+    if (criteriaToEdit.location_data && Array.isArray(criteriaToEdit.location_data)) {
+      setSelectedLocations(criteriaToEdit.location_data);
+    } else if (criteriaToEdit.psl_codes && criteriaToEdit.psl_codes.length > 0) {
+      // Fallback for old data without location_data
       setSelectedLocations(
         criteriaToEdit.psl_codes.map((code) => ({
-          name: code, // Will show PSL code as name since we don't have the actual name
+          name: code,
           pslCode: code,
           address: code,
         }))
@@ -1176,23 +1227,16 @@ export default function BuyerDetailPage() {
               onSubmit={handleSaveCriteria}
               className="border rounded-lg p-4 mb-6 bg-gray-50 space-y-4"
             >
-              <h3 className="font-semibold text-lg">
-                {editingCriteriaId ? "Edit Search Criteria" : "Add New Search Criteria"}
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="criteria-name">Search Name *</Label>
-                  <Input
-                    id="criteria-name"
-                    placeholder="e.g., 2BR Apartments in Marina"
-                    value={criteriaForm.name}
-                    onChange={(e) =>
-                      setCriteriaForm({ ...criteriaForm, name: e.target.value })
-                    }
-                    required
-                  />
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-lg">
+                  {editingCriteriaId ? "Edit Search Criteria" : "Add New Search Criteria"}
+                </h3>
+                <div className="text-sm text-gray-600">
+                  <span className="font-medium">Preview:</span>{" "}
+                  <span className="text-blue-600">{generateSearchName()}</span>
                 </div>
-
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label>Transaction Type</Label>
                   <Select
@@ -1258,15 +1302,14 @@ export default function BuyerDetailPage() {
 
                 <div className="space-y-2">
                   <Label htmlFor="min-price">Min Price (AED)</Label>
-                  <Input
+                  <FormattedNumberInput
                     id="min-price"
-                    type="number"
-                    placeholder="e.g., 1000000"
+                    placeholder="e.g., 1,000,000"
                     value={criteriaForm.min_price_aed}
-                    onChange={(e) =>
+                    onChange={(value) =>
                       setCriteriaForm({
                         ...criteriaForm,
-                        min_price_aed: e.target.value,
+                        min_price_aed: value,
                       })
                     }
                   />
@@ -1274,61 +1317,59 @@ export default function BuyerDetailPage() {
 
                 <div className="space-y-2">
                   <Label htmlFor="max-price">Max Price (AED)</Label>
-                  <Input
+                  <FormattedNumberInput
                     id="max-price"
-                    type="number"
-                    placeholder="e.g., 5000000"
+                    placeholder="e.g., 5,000,000"
                     value={criteriaForm.max_price_aed}
-                    onChange={(e) =>
+                    onChange={(value) =>
                       setCriteriaForm({
                         ...criteriaForm,
-                        max_price_aed: e.target.value,
+                        max_price_aed: value,
                       })
                     }
                   />
                 </div>
+              </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="keywords">Keywords</Label>
-                  <Input
-                    id="keywords"
-                    placeholder="e.g., sea view, upgraded"
-                    value={criteriaForm.keywords}
-                    onChange={(e) =>
-                      setCriteriaForm({ ...criteriaForm, keywords: e.target.value })
-                    }
-                  />
-                </div>
+              {/* Keywords */}
+              <div className="space-y-2">
+                <Label>Keywords</Label>
+                <KeywordChipsInput
+                  id="keywords"
+                  keywords={criteriaForm.keywords}
+                  onKeywordsChange={(keywords) =>
+                    setCriteriaForm({ ...criteriaForm, keywords })
+                  }
+                  placeholder="e.g., sea view, upgraded, high floor..."
+                />
               </div>
 
               {/* Area Range */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="min-area">Min Area (sqft)</Label>
-                  <Input
+                  <FormattedNumberInput
                     id="min-area"
-                    type="number"
-                    placeholder="e.g., 5000"
+                    placeholder="e.g., 5,000"
                     value={criteriaForm.min_area_sqft}
-                    onChange={(e) =>
+                    onChange={(value) =>
                       setCriteriaForm({
                         ...criteriaForm,
-                        min_area_sqft: e.target.value,
+                        min_area_sqft: value,
                       })
                     }
                   />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="max-area">Max Area (sqft)</Label>
-                  <Input
+                  <FormattedNumberInput
                     id="max-area"
-                    type="number"
-                    placeholder="e.g., 50000"
+                    placeholder="e.g., 50,000"
                     value={criteriaForm.max_area_sqft}
-                    onChange={(e) =>
+                    onChange={(value) =>
                       setCriteriaForm({
                         ...criteriaForm,
-                        max_area_sqft: e.target.value,
+                        max_area_sqft: value,
                       })
                     }
                   />
@@ -1482,7 +1523,7 @@ export default function BuyerDetailPage() {
               </div>
 
               <div className="flex gap-3 pt-2">
-                <Button type="submit" disabled={!criteriaForm.name || isSaving}>
+                <Button type="submit" disabled={isSaving}>
                   {isSaving ? "Saving..." : editingCriteriaId ? "Update Criteria" : "Save Criteria"}
                 </Button>
                 <Button
