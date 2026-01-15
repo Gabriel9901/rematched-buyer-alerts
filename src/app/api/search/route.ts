@@ -66,8 +66,9 @@ function toTypesenseCriteria(dbCriteria: BuyerCriteria, useTemporalFilter: boole
     dateFrom: dateFrom,
     dateTo: dbCriteria.date_to ? Math.floor(new Date(dbCriteria.date_to).getTime() / 1000) : undefined,
 
-    // Fallback: if no dateFrom is set, use sinceDaysAgo
-    sinceDaysAgo: dateFrom ? undefined : DEFAULT_LOOKBACK_DAYS,
+    // Fallback: if no dateFrom is set AND we're using temporal filtering, use sinceDaysAgo
+    // When useTemporalFilter is false (fullRescan/all time), don't apply any date filter
+    sinceDaysAgo: (dateFrom || !useTemporalFilter) ? undefined : DEFAULT_LOOKBACK_DAYS,
     perPage: 25, // Balance between coverage and Gemini qualification time
   };
 }

@@ -146,6 +146,12 @@ const FACET_BY = [
 const MAIN_SORT_BY =
   'source_timestamp_group:desc,_eval([ (source:=[app,xml]):2, (source:=[whatsapp,telegram]):1 ]):desc,source_timestamp:desc';
 
+// Default max price for listings (matches ReMatch app behavior)
+// This serves two purposes:
+// 1. Sanity ceiling (no listing costs 200M AED)
+// 2. Excludes listings with null price_aed (Typesense <= filter fails on null)
+const DEFAULT_MAX_PRICE_AED = 200_000_000;
+
 // =============================================================================
 // FILTER BUILDER
 // =============================================================================
@@ -181,8 +187,13 @@ export function buildFilterBy(criteria: Criteria, opts: FilterOptions = {}): str
   }
 
   // Price filters
+  // For listings: apply default max price if none specified (matches ReMatch behavior)
+  // This also excludes listings with null price_aed since Typesense <= fails on null
   if (criteria.maxPriceAed !== undefined) {
     clauses.push(`data.price_aed:<=${sanitizeNumber(criteria.maxPriceAed)}`);
+  } else if (kind === 'listing') {
+    // Default max price for listings - excludes null prices and acts as sanity ceiling
+    clauses.push(`data.price_aed:<=${DEFAULT_MAX_PRICE_AED}`);
   }
   if (criteria.minPriceAed !== undefined) {
     clauses.push(`data.price_aed:>=${sanitizeNumber(criteria.minPriceAed)}`);
@@ -285,6 +296,16 @@ export function buildFilterBy(criteria: Criteria, opts: FilterOptions = {}): str
     clauses.push(`data.is_community_agnostic:=${criteria.isCommunityAgnostic}`);
   }
 
+  // Keyword filter on message body (matches ReMatch app behavior)
+  // Uses wildcard contains filter instead of q parameter for more precise matching
+  if (criteria.q && criteria.q !== '*') {
+    // Sanitize keyword - allow only alphanumeric for safety
+    const keyword = criteria.q.replace(/[^a-zA-Z0-9]/g, '');
+    if (keyword.length > 0) {
+      clauses.push(`(data.message_body_clean:*${keyword}*)`);
+    }
+  }
+
   // Date range filters
   if (criteria.dateFrom !== undefined) {
     clauses.push(`source_timestamp:>=${sanitizeNumber(criteria.dateFrom)}`);
@@ -321,11 +342,13 @@ export function buildFilterBy(criteria: Criteria, opts: FilterOptions = {}): str
 
 /**
  * Base search object with common settings
+ * NOTE: q is always '*' because keywords are handled via filter_by on message_body_clean
+ * This matches ReMatch app behavior and provides more precise keyword matching
  */
 function buildBaseSearch(criteria: Criteria): Omit<TypesenseSearch, 'filter_by' | 'sort_by' | 'per_page'> {
   return {
     collection: 'unit',
-    q: criteria.q ?? '*',
+    q: '*', // Keywords go in filter_by, not q (matches ReMatch)
     query_by: QUERY_BY,
     query_by_weights: QUERY_BY_WEIGHTS,
     highlight_full_fields: HIGHLIGHT_FIELDS,
