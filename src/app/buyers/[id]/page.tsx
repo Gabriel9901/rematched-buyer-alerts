@@ -87,6 +87,7 @@ export default function BuyerDetailPage() {
   const [isCustomPrompt, setIsCustomPrompt] = useState(false);
   const [promptLoading, setPromptLoading] = useState(false);
   const [showPlaceholderRef, setShowPlaceholderRef] = useState(false);
+  const [expandedRecentMatch, setExpandedRecentMatch] = useState<string | null>(null);
 
   // AbortController ref for cancelling in-flight searches
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1557,63 +1558,113 @@ export default function BuyerDetailPage() {
               No matches yet. Run a search to find matching properties.
             </p>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Property</TableHead>
-                  <TableHead>Location</TableHead>
-                  <TableHead className="text-right">Price</TableHead>
-                  <TableHead className="text-center">Score</TableHead>
-                  <TableHead>Criteria</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {recentMatches.map((match) => {
-                  const data = match.listing_data as {
-                    data?: {
-                      bedrooms?: number[];
-                      property_type?: string[];
-                      location_raw?: string;
-                      price_aed?: number;
-                    };
+            <div className="space-y-3">
+              {recentMatches.map((match) => {
+                const data = match.listing_data as {
+                  data?: {
+                    bedrooms?: number[];
+                    property_type?: string[];
+                    location_raw?: string;
+                    price_aed?: number;
+                    area_sqft?: number;
+                    message_body_clean?: string;
                   };
-                  const listingData = data?.data || {};
+                };
+                const listingData = data?.data || {};
+                const isExpanded = expandedRecentMatch === match.id;
+                const criteriaName = (match as Match & { criteria?: { name: string } }).criteria?.name;
 
-                  return (
-                    <TableRow key={match.id}>
-                      <TableCell>
-                        <div className="font-medium">
-                          {listingData.bedrooms?.[0] || "?"} BR{" "}
-                          {listingData.property_type?.[0] || "Property"}
+                return (
+                  <div
+                    key={match.id}
+                    className="border rounded-lg p-4 bg-white hover:shadow-sm transition-shadow"
+                  >
+                    {/* Header: Location + Price + Score */}
+                    <div className="flex items-start justify-between mb-3">
+                      <div>
+                        <h4 className="font-semibold text-gray-900">
+                          {listingData.location_raw || "Unknown Location"}
+                          {listingData.price_aed && (
+                            <span className="text-gray-500 font-normal ml-2">
+                              {formatPrice(listingData.price_aed)}
+                            </span>
+                          )}
+                        </h4>
+                      </div>
+                      <Badge
+                        variant={
+                          (match.relevance_score || 0) >= 90
+                            ? "default"
+                            : (match.relevance_score || 0) >= 70
+                            ? "secondary"
+                            : "outline"
+                        }
+                      >
+                        {match.relevance_score || 0}%
+                      </Badge>
+                    </div>
+
+                    {/* AI Summary - Prominent Display */}
+                    {match.qualification_notes && (
+                      <div className="bg-blue-50 rounded-lg p-3 mb-3">
+                        <p className="text-xs font-medium text-blue-800 mb-1">AI Analysis</p>
+                        <p className="text-sm text-blue-700">{match.qualification_notes}</p>
+                      </div>
+                    )}
+
+                    {/* Expand/Collapse Toggle */}
+                    <button
+                      onClick={() => setExpandedRecentMatch(isExpanded ? null : match.id)}
+                      className="text-xs font-medium text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                    >
+                      <span>{isExpanded ? "▼" : "▶"}</span>
+                      <span>{isExpanded ? "Hide Details" : "Show Details"}</span>
+                    </button>
+
+                    {/* Expanded Details */}
+                    {isExpanded && (
+                      <div className="mt-3 pt-3 border-t border-gray-100 space-y-3">
+                        {/* Property Details Grid */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+                          <div>
+                            <p className="text-xs text-gray-500">Property</p>
+                            <p className="font-medium">
+                              {listingData.bedrooms?.[0] || "?"} BR {listingData.property_type?.[0] || "Property"}
+                            </p>
+                          </div>
+                          {listingData.area_sqft && (
+                            <div>
+                              <p className="text-xs text-gray-500">Area</p>
+                              <p className="font-medium">{listingData.area_sqft.toLocaleString()} sqft</p>
+                            </div>
+                          )}
+                          {criteriaName && (
+                            <div>
+                              <p className="text-xs text-gray-500">Criteria</p>
+                              <p className="font-medium">{criteriaName}</p>
+                            </div>
+                          )}
+                          <div>
+                            <p className="text-xs text-gray-500">Matched</p>
+                            <p className="font-medium">{new Date(match.created_at).toLocaleDateString()}</p>
+                          </div>
                         </div>
-                      </TableCell>
-                      <TableCell className="text-gray-600">
-                        {listingData.location_raw || "Unknown"}
-                      </TableCell>
-                      <TableCell className="text-right font-medium">
-                        {listingData.price_aed
-                          ? formatPrice(listingData.price_aed)
-                          : "N/A"}
-                      </TableCell>
-                      <TableCell className="text-center">
-                        <Badge
-                          variant={
-                            (match.relevance_score || 0) >= 90
-                              ? "default"
-                              : "secondary"
-                          }
-                        >
-                          {match.relevance_score || 0}%
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-gray-500 text-sm">
-                        {(match as Match & { criteria?: { name: string } }).criteria?.name || "Unknown"}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+
+                        {/* Full Description */}
+                        {listingData.message_body_clean && (
+                          <div className="bg-gray-50 rounded-lg p-3">
+                            <p className="text-xs font-medium text-gray-600 mb-1">Full Description</p>
+                            <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans">
+                              {listingData.message_body_clean}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           )}
         </CardContent>
       </Card>
