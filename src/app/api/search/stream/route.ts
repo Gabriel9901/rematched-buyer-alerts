@@ -48,11 +48,20 @@ interface SearchResults {
 const DEFAULT_LOOKBACK_DAYS = 7;
 
 // Convert DB criteria to Typesense criteria with temporal filtering
-function toTypesenseCriteria(dbCriteria: BuyerCriteria, useTemporalFilter: boolean = true): Criteria {
-  // Determine the date filter based on last_run_at (temporal deduplication)
+function toTypesenseCriteria(
+  dbCriteria: BuyerCriteria,
+  useTemporalFilter: boolean = true,
+  customDateFrom?: string,
+  customDateTo?: string
+): Criteria {
+  // Determine the date filter based on custom dates, last_run_at, or explicit date_from
   let dateFrom: number | undefined = undefined;
+  let dateTo: number | undefined = undefined;
 
-  if (useTemporalFilter && dbCriteria.last_run_at) {
+  // Custom date range takes priority (from time range dialog)
+  if (customDateFrom) {
+    dateFrom = Math.floor(new Date(customDateFrom).getTime() / 1000);
+  } else if (useTemporalFilter && dbCriteria.last_run_at) {
     // Use last_run_at for temporal filtering - only get listings since last run
     dateFrom = Math.floor(new Date(dbCriteria.last_run_at).getTime() / 1000);
   } else if (dbCriteria.date_from) {
@@ -60,6 +69,13 @@ function toTypesenseCriteria(dbCriteria: BuyerCriteria, useTemporalFilter: boole
     dateFrom = Math.floor(new Date(dbCriteria.date_from).getTime() / 1000);
   }
   // If neither is set, sinceDaysAgo will be used as fallback
+
+  // Custom dateTo if provided, otherwise use criteria's date_to
+  if (customDateTo) {
+    dateTo = Math.floor(new Date(customDateTo).getTime() / 1000);
+  } else if (dbCriteria.date_to) {
+    dateTo = Math.floor(new Date(dbCriteria.date_to).getTime() / 1000);
+  }
 
   return {
     userId: process.env.APP_USER_ID || 'user_default',
@@ -87,9 +103,9 @@ function toTypesenseCriteria(dbCriteria: BuyerCriteria, useTemporalFilter: boole
     isCommunityAgnostic: dbCriteria.is_community_agnostic ?? undefined,
     furnishing: dbCriteria.furnishing || undefined,
     mortgageOrCash: dbCriteria.mortgage_or_cash || undefined,
-    // Temporal filtering: use dateFrom from last_run_at if available
+    // Temporal filtering: use dateFrom from custom date, last_run_at, or criteria setting
     dateFrom: dateFrom,
-    dateTo: dbCriteria.date_to ? Math.floor(new Date(dbCriteria.date_to).getTime() / 1000) : undefined,
+    dateTo: dateTo,
     // Fallback: if no dateFrom is set, use sinceDaysAgo
     sinceDaysAgo: dateFrom ? undefined : DEFAULT_LOOKBACK_DAYS,
     perPage: 100, // Increased from 25 to get more results
@@ -390,6 +406,8 @@ export async function POST(request: NextRequest) {
           debugMode = false,
           qualificationPrompt: customPromptFromUI,
           fullRescan = false, // If true, ignore last_run_at and do full search
+          customDateFrom, // Custom date range start (ISO string)
+          customDateTo,   // Custom date range end (ISO string)
         } = body;
 
         if (!buyerId && !criteriaId) {
@@ -505,7 +523,7 @@ export async function POST(request: NextRequest) {
               lastRunAt: criteria.last_run_at,
             });
 
-            const searchCriteria = toTypesenseCriteria(criteria, useTemporalFilter);
+            const searchCriteria = toTypesenseCriteria(criteria, useTemporalFilter, customDateFrom, customDateTo);
             const searchBody = buildSimpleSearchBody(searchCriteria);
 
             // Debug: Send the Typesense query
