@@ -80,6 +80,10 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
     setParsedCriteria([]);
     setWarnings([]);
 
+    // Create abort controller for timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 55000); // 55s timeout (under Vercel's 60s limit)
+
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -90,11 +94,14 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
       const response = await fetch("/api/criteria/parse-file", {
         method: "POST",
         body: formData,
+        signal: controller.signal,
       });
 
+      clearTimeout(timeoutId);
+
       if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || "Failed to parse file");
+        const err = await response.json().catch(() => ({ error: `Server error: ${response.status}` }));
+        throw new Error(err.error || err.details || `Server error: ${response.status}`);
       }
 
       const result: ParseFileResult = await response.json();
@@ -117,7 +124,20 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
         }))
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to parse file");
+      clearTimeout(timeoutId);
+
+      // Handle specific error types
+      if (err instanceof Error) {
+        if (err.name === "AbortError") {
+          setError("Request timed out. Try with a smaller file or simpler document.");
+        } else if (err.message.includes("Failed to fetch")) {
+          setError("Network error. Please check your connection and try again.");
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError("Failed to parse file");
+      }
     } finally {
       setIsParsing(false);
     }

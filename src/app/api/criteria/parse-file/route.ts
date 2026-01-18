@@ -67,23 +67,56 @@ export async function POST(request: NextRequest) {
     }
 
     // Convert file to base64
+    console.log(`[parse-file] Processing file: ${file.name}, type: ${file.type}, size: ${file.size} bytes`);
     const arrayBuffer = await file.arrayBuffer();
     const base64Data = Buffer.from(arrayBuffer).toString('base64');
+    console.log(`[parse-file] Base64 encoded, length: ${base64Data.length} chars`);
 
-    // Parse the file
+    // Parse the file with Gemini
+    console.log('[parse-file] Calling Gemini multimodal API...');
     const result = await parseFileToCriteria(
       base64Data,
       file.type,
       additionalContext || undefined
     );
+    console.log(`[parse-file] Gemini returned ${result.criteria.length} criteria, ${result.warnings.length} warnings`);
 
     return NextResponse.json(result);
   } catch (error) {
-    console.error('Parse file API error:', error);
+    // Log detailed error info
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    console.error('[parse-file] API error:', {
+      message: errorMessage,
+      stack: errorStack,
+      error,
+    });
+
+    // Check for specific error types
+    if (errorMessage.includes('API error')) {
+      return NextResponse.json(
+        {
+          error: 'AI service error. The Gemini API returned an error.',
+          details: errorMessage,
+        },
+        { status: 502 }
+      );
+    }
+
+    if (errorMessage.includes('timeout') || errorMessage.includes('ETIMEDOUT')) {
+      return NextResponse.json(
+        {
+          error: 'Request timed out. Try with a smaller file or simpler document.',
+          details: errorMessage,
+        },
+        { status: 504 }
+      );
+    }
+
     return NextResponse.json(
       {
         error: 'Failed to parse file',
-        details: error instanceof Error ? error.message : 'Unknown error',
+        details: errorMessage,
       },
       { status: 500 }
     );

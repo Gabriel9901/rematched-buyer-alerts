@@ -1,11 +1,11 @@
 /**
  * Gemini API Client
  *
- * Uses Gemini 2.5 Flash with x-goog-api-key header authentication.
+ * Uses Gemini 2.0 Flash for stable multimodal support (images, PDFs).
  * Endpoint: generativelanguage.googleapis.com/v1beta
  */
 
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 
 export interface GeminiResponse {
   candidates: Array<{
