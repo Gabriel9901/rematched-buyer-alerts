@@ -650,25 +650,48 @@ export default function BuyerDetailPage() {
   };
 
   // Handle File Upload - create multiple criteria
-  const handleFileUploadCreate = async (parsedCriteria: NamedParsedCriteria[]) => {
+  // resolvedLocationsMap maps the original criteria index to resolved locations with PSL codes
+  const handleFileUploadCreate = async (
+    parsedCriteria: NamedParsedCriteria[],
+    resolvedLocationsMap: Map<number, Array<{ name: string; pslCode: string; address: string }>>
+  ) => {
     if (!supabase) return;
 
+    // Track original indices for selected criteria
+    let selectedIndex = 0;
     for (const parsed of parsedCriteria) {
-      // Resolve location names to PSL codes (simplified - just use names as communities)
-      const locationData = parsed.location_names.map((name) => ({
-        name,
-        pslCode: "", // Will need to be resolved via location search
-        address: name,
-      }));
+      // Get resolved locations for this criteria (from the map)
+      const resolvedLocations = resolvedLocationsMap.get(selectedIndex) || [];
+      selectedIndex++;
+
+      // Extract PSL codes from resolved locations (filter out empty ones)
+      const pslCodes = resolvedLocations
+        .map((loc) => loc.pslCode)
+        .filter((code) => code && code.length > 0);
+
+      // Build location_data with resolved PSL codes
+      const locationData = resolvedLocations.length > 0
+        ? resolvedLocations.map((loc) => ({
+            name: loc.name,
+            pslCode: loc.pslCode,
+            address: loc.address,
+          }))
+        : parsed.location_names.map((name) => ({
+            name,
+            pslCode: "",
+            address: name,
+          }));
 
       const criteriaData = {
         buyer_id: buyerId,
-        search_name: parsed.name,
+        name: parsed.name,
         transaction_type: parsed.transaction_type,
         kind: "listing",
         property_types: parsed.property_types.length > 0 ? parsed.property_types : null,
+        // Use location names as communities for fallback text-based filtering
         communities: parsed.location_names.length > 0 ? parsed.location_names : null,
-        psl_codes: null, // Would need location resolution
+        // Use resolved PSL codes for precise location filtering
+        psl_codes: pslCodes.length > 0 ? pslCodes : null,
         location_data: locationData.length > 0 ? locationData : null,
         bedrooms: parsed.bedrooms.length > 0 ? parsed.bedrooms : null,
         bathrooms: parsed.bathrooms.length > 0 ? parsed.bathrooms : null,

@@ -9,9 +9,17 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { NamedParsedCriteria } from "@/lib/criteria/parseText";
+import { LocationSearch } from "@/components/LocationSearch";
+
+// Location with PSL code for precise filtering
+interface ResolvedLocation {
+  name: string;
+  pslCode: string;
+  address: string;
+}
 
 interface FileUploadModeProps {
-  onCreateCriteria: (criteria: NamedParsedCriteria[]) => Promise<void>;
+  onCreateCriteria: (criteria: NamedParsedCriteria[], resolvedLocationsMap: Map<number, ResolvedLocation[]>) => Promise<void>;
   onCancel: () => void;
 }
 
@@ -20,6 +28,7 @@ interface ParsedCriteriaItem {
   confidence: number;
   selected: boolean;
   isEditing: boolean;
+  resolvedLocations: ResolvedLocation[]; // Locations with PSL codes
 }
 
 interface ParseFileResult {
@@ -115,12 +124,18 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
         return;
       }
 
-      // Initialize all criteria as selected, not editing
+      // Initialize all criteria as selected, not editing, with empty resolved locations
       setParsedCriteria(
         result.criteria.map((c) => ({
           ...c,
           selected: true,
           isEditing: false,
+          // Initialize resolved locations from parsed location_names (without PSL codes yet)
+          resolvedLocations: c.parsed.location_names.map((name) => ({
+            name,
+            pslCode: "", // Will be resolved when user uses LocationSearch
+            address: name,
+          })),
         }))
       );
     } catch (err) {
@@ -165,6 +180,25 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
     );
   };
 
+  // Handler for updating resolved locations (with PSL codes)
+  const handleUpdateLocations = (index: number, locations: ResolvedLocation[]) => {
+    setParsedCriteria((prev) =>
+      prev.map((c, i) =>
+        i === index
+          ? {
+              ...c,
+              resolvedLocations: locations,
+              // Also update the parsed location_names to keep them in sync
+              parsed: {
+                ...c.parsed,
+                location_names: locations.map((l) => l.name),
+              },
+            }
+          : c
+      )
+    );
+  };
+
   const handleCreateSelected = async () => {
     const selected = parsedCriteria.filter((c) => c.selected);
     if (selected.length === 0) {
@@ -172,9 +206,17 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
       return;
     }
 
+    // Build a map of index -> resolved locations for selected criteria
+    const resolvedLocationsMap = new Map<number, ResolvedLocation[]>();
+    parsedCriteria.forEach((c, index) => {
+      if (c.selected) {
+        resolvedLocationsMap.set(index, c.resolvedLocations);
+      }
+    });
+
     setIsCreating(true);
     try {
-      await onCreateCriteria(selected.map((c) => c.parsed));
+      await onCreateCriteria(selected.map((c) => c.parsed), resolvedLocationsMap);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create criteria");
     } finally {
@@ -214,6 +256,29 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
       return k === Math.floor(k) ? `${k}K` : price.toLocaleString();
     }
     return price.toString();
+  };
+
+  const formatArea = (area: number | null) => {
+    if (!area) return "—";
+    return `${area.toLocaleString()} sqft`;
+  };
+
+  const parseArea = (value: string): number | null => {
+    if (!value.trim()) return null;
+    const cleaned = value.toUpperCase().replace(/[,\s]/g, "");
+    const kMatch = cleaned.match(/^([\d.]+)K$/);
+    if (kMatch) return Math.round(parseFloat(kMatch[1]) * 1000);
+    const num = parseFloat(cleaned);
+    return isNaN(num) ? null : Math.round(num);
+  };
+
+  const formatAreaInput = (area: number | null): string => {
+    if (!area) return "";
+    if (area >= 10000) {
+      const k = area / 1000;
+      return k === Math.floor(k) ? `${k}K` : area.toLocaleString();
+    }
+    return area.toString();
   };
 
   return (
@@ -461,6 +526,36 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
                         </div>
                       </div>
 
+                      {/* Area Range */}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <Label className="text-xs text-gray-500">Min Area (sqft)</Label>
+                          <Input
+                            defaultValue={formatAreaInput(item.parsed.min_area_sqft)}
+                            onChange={(e) =>
+                              handleUpdateCriteria(index, {
+                                min_area_sqft: parseArea(e.target.value),
+                              })
+                            }
+                            placeholder="e.g., 1000, 2K"
+                            className="h-9"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs text-gray-500">Max Area (sqft)</Label>
+                          <Input
+                            defaultValue={formatAreaInput(item.parsed.max_area_sqft)}
+                            onChange={(e) =>
+                              handleUpdateCriteria(index, {
+                                max_area_sqft: parseArea(e.target.value),
+                              })
+                            }
+                            placeholder="e.g., 5K, 10K"
+                            className="h-9"
+                          />
+                        </div>
+                      </div>
+
                       {/* Bedrooms */}
                       <div className="space-y-1">
                         <Label className="text-xs text-gray-500">Bedrooms</Label>
@@ -486,18 +581,11 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
 
                       {/* Locations */}
                       <div className="space-y-1">
-                        <Label className="text-xs text-gray-500">Locations</Label>
-                        <Input
-                          value={item.parsed.location_names.join(", ")}
-                          onChange={(e) => {
-                            const locations = e.target.value
-                              .split(",")
-                              .map((s) => s.trim())
-                              .filter((s) => s.length > 0);
-                            handleUpdateCriteria(index, { location_names: locations });
-                          }}
-                          placeholder="e.g., Dubai Marina, JBR, Downtown"
-                          className="h-9"
+                        <Label className="text-xs text-gray-500">Locations (with PSL codes)</Label>
+                        <LocationSearch
+                          selectedLocations={item.resolvedLocations}
+                          onLocationsChange={(locations) => handleUpdateLocations(index, locations)}
+                          placeholder="Search for Dubai communities..."
                         />
                       </div>
 
@@ -606,15 +694,28 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
                             {formatPrice(item.parsed.max_price_aed)}
                           </div>
                         )}
-                        {item.parsed.location_names.length > 0 && (
+                        {(item.parsed.min_area_sqft || item.parsed.max_area_sqft) && (
                           <div>
+                            <span className="text-gray-500">Area:</span>{" "}
+                            {formatArea(item.parsed.min_area_sqft)} –{" "}
+                            {formatArea(item.parsed.max_area_sqft)}
+                          </div>
+                        )}
+                        {item.resolvedLocations.length > 0 && (
+                          <div className="flex items-center gap-1">
                             <span className="text-gray-500">Location:</span>{" "}
-                            {item.parsed.location_names.slice(0, 2).join(", ")}
-                            {item.parsed.location_names.length > 2 && (
+                            {item.resolvedLocations.slice(0, 2).map((loc) => loc.name).join(", ")}
+                            {item.resolvedLocations.length > 2 && (
                               <span className="text-gray-400">
                                 {" "}
-                                +{item.parsed.location_names.length - 2}
+                                +{item.resolvedLocations.length - 2}
                               </span>
+                            )}
+                            {/* Show PSL status indicator */}
+                            {item.resolvedLocations.some((l) => l.pslCode) ? (
+                              <span className="text-green-600 text-xs" title="PSL codes resolved">✓</span>
+                            ) : (
+                              <span className="text-yellow-600 text-xs" title="Click Edit to resolve PSL codes">⚠</span>
                             )}
                           </div>
                         )}
