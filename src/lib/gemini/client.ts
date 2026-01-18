@@ -124,6 +124,94 @@ function extractCompleteJsonObjects(text: string): unknown[] {
 }
 
 /**
+ * Call Gemini API with multimodal input (text + file)
+ *
+ * @param apiKey - Gemini API key
+ * @param prompt - The text prompt to send
+ * @param fileData - Base64-encoded file data
+ * @param mimeType - MIME type of the file (image/png, image/jpeg, application/pdf)
+ * @returns The generated text response
+ */
+export async function callGeminiMultimodal(
+  apiKey: string,
+  prompt: string,
+  fileData: string,
+  mimeType: string
+): Promise<string> {
+  const response = await fetch(GEMINI_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [
+            { text: prompt },
+            {
+              inlineData: {
+                mimeType,
+                data: fileData,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new GeminiError(
+      `Gemini API error: ${response.status} ${response.statusText}`,
+      response.status,
+      errorData
+    );
+  }
+
+  const data: GeminiResponse = await response.json();
+
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) {
+    throw new GeminiError('No text in Gemini response');
+  }
+
+  return text;
+}
+
+/**
+ * Call Gemini with multimodal input expecting JSON response
+ *
+ * @param apiKey - Gemini API key
+ * @param prompt - The prompt (should instruct to return JSON)
+ * @param fileData - Base64-encoded file data
+ * @param mimeType - MIME type of the file
+ * @returns Parsed JSON object
+ */
+export async function callGeminiMultimodalJson<T>(
+  apiKey: string,
+  prompt: string,
+  fileData: string,
+  mimeType: string
+): Promise<T> {
+  const text = await callGeminiMultimodal(apiKey, prompt, fileData, mimeType);
+
+  // Extract JSON from response (handle markdown code blocks)
+  let jsonStr = text;
+  const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (jsonMatch) {
+    jsonStr = jsonMatch[1].trim();
+  }
+
+  try {
+    return JSON.parse(jsonStr);
+  } catch {
+    throw new GeminiError(`Failed to parse Gemini JSON response: ${text.substring(0, 200)}`);
+  }
+}
+
+/**
  * Call Gemini with a batch prompt expecting JSON array response.
  * Handles large responses and truncated JSON gracefully.
  *

@@ -5,7 +5,7 @@
  * using Gemini AI, with validation and normalization.
  */
 
-import { callGeminiJson } from '@/lib/gemini/client';
+import { callGeminiJson, callGeminiMultimodalJson } from '@/lib/gemini/client';
 
 // Valid values for enum fields
 const VALID_PROPERTY_TYPES = ['apartment', 'villa', 'townhouse', 'office', 'land', 'retail', 'other'];
@@ -35,6 +35,24 @@ export interface ParsedCriteria {
 export interface ParseResult {
   parsed: ParsedCriteria;
   confidence: number;
+  warnings: string[];
+}
+
+/**
+ * Extended criteria with a name field for multi-criteria extraction
+ */
+export interface NamedParsedCriteria extends ParsedCriteria {
+  name: string; // Auto-generated name for this search criteria
+}
+
+/**
+ * Result from parsing a file that may contain multiple buyer profiles
+ */
+export interface MultiParseResult {
+  criteria: Array<{
+    parsed: NamedParsedCriteria;
+    confidence: number;
+  }>;
   warnings: string[];
 }
 
@@ -301,6 +319,144 @@ export async function parseTextToCriteria(text: string): Promise<ParseResult> {
       },
       confidence: 0,
       warnings: [`Failed to parse: ${error instanceof Error ? error.message : 'Unknown error'}`],
+    };
+  }
+}
+
+/**
+ * Build the Gemini prompt for file-based multi-criteria extraction
+ */
+export function buildFileParsePrompt(additionalContext?: string): string {
+  const contextSection = additionalContext
+    ? `\nADDITIONAL CONTEXT FROM USER:\n"${additionalContext}"\n`
+    : '';
+
+  return `You are a Dubai real estate search criteria parser. Analyze this document and extract ALL distinct buyer profiles/requirements into structured search criteria.
+
+${contextSection}
+IMPORTANT: A document may contain MULTIPLE different buyer requirements. Create a SEPARATE criteria object for each distinct search profile you identify. For example:
+- If a buyer wants "2BR in Marina OR 3BR in JVC" → create TWO criteria objects
+- If a document lists requirements for multiple clients → create one criteria per client
+- If there's only one buyer profile → return an array with one criteria
+
+OUTPUT: Valid JSON array of criteria objects:
+[
+  {
+    "name": "Short descriptive name (e.g., '2BR Marina Apartment', '3BR JVC Villa')",
+    "transaction_type": "sale" or "rent" (default "sale"),
+    "property_types": ["apartment", "villa", "townhouse", "office", "land", "retail", "other"],
+    "bedrooms": [array of integers, 0=studio],
+    "bathrooms": [array of integers] or [],
+    "min_price_aed": number or null,
+    "max_price_aed": number or null,
+    "min_area_sqft": number or null,
+    "max_area_sqft": number or null,
+    "furnishing": ["furnished", "unfurnished", "semi-furnished"] or [],
+    "is_off_plan": true/false/null,
+    "is_distressed_deal": true/false/null,
+    "is_urgent": true/false/null,
+    "is_direct": true/false/null,
+    "location_names": ["Dubai Marina", "JBR", etc],
+    "ai_prompt": "Requirements that can't be mapped to structured fields",
+    "confidence": 0-100
+  }
+]
+
+PARSING RULES:
+1. Dubai prices are in AED. "2M" = 2,000,000, "500K" = 500,000
+2. Area is typically in sqft. Convert sqm: 1 sqm = 10.764 sqft
+3. "Studio" = bedrooms: [0]
+4. "1-3BR" means bedrooms: [1, 2, 3]
+5. Generate a descriptive "name" for each criteria (e.g., "2BR Marina Sale", "3BR JVC Rent")
+6. Put qualitative requirements in ai_prompt: sea view, high floor, upgraded, corner unit, pool view, specific amenities, etc.
+7. If you see "OR" conditions for different property types/locations, split into separate criteria
+8. Only set boolean filters if EXPLICITLY mentioned
+
+IMPORTANT: Output ONLY the JSON array, no other text.`;
+}
+
+/**
+ * Validate and normalize a single criteria from multi-criteria extraction
+ */
+function validateAndNormalizeNamed(raw: Record<string, unknown>): {
+  parsed: NamedParsedCriteria;
+  confidence: number;
+} {
+  const { result } = validateAndNormalize(raw);
+
+  // Extract name, generate default if missing
+  let name = 'New Search';
+  if (typeof raw.name === 'string' && raw.name.trim()) {
+    name = raw.name.trim();
+  } else {
+    // Generate name from criteria
+    const parts: string[] = [];
+    if (result.parsed.bedrooms.length === 1) {
+      parts.push(result.parsed.bedrooms[0] === 0 ? 'Studio' : `${result.parsed.bedrooms[0]}BR`);
+    } else if (result.parsed.bedrooms.length > 1) {
+      parts.push(`${Math.min(...result.parsed.bedrooms)}-${Math.max(...result.parsed.bedrooms)}BR`);
+    }
+    if (result.parsed.location_names.length > 0) {
+      parts.push(result.parsed.location_names[0].split(' ')[0]);
+    }
+    if (result.parsed.property_types.length === 1) {
+      parts.push(result.parsed.property_types[0].charAt(0).toUpperCase() + result.parsed.property_types[0].slice(1));
+    }
+    parts.push(result.parsed.transaction_type === 'rent' ? 'Rent' : 'Sale');
+    name = parts.join(' ') || 'New Search';
+  }
+
+  return {
+    parsed: {
+      ...result.parsed,
+      name,
+    },
+    confidence: result.confidence,
+  };
+}
+
+/**
+ * Parse a file (PDF or image) into one or more structured criteria
+ */
+export async function parseFileToCriteria(
+  fileData: string,
+  mimeType: string,
+  additionalContext?: string
+): Promise<MultiParseResult> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY environment variable not configured');
+  }
+
+  const prompt = buildFileParsePrompt(additionalContext);
+  const warnings: string[] = [];
+
+  try {
+    const raw = await callGeminiMultimodalJson<unknown[]>(apiKey, prompt, fileData, mimeType);
+
+    // Ensure we have an array
+    const rawArray = Array.isArray(raw) ? raw : [raw];
+
+    // Validate each criteria
+    const criteria = rawArray.map((item, index) => {
+      try {
+        return validateAndNormalizeNamed(item as Record<string, unknown>);
+      } catch (err) {
+        warnings.push(`Failed to parse criteria ${index + 1}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        return null;
+      }
+    }).filter((c): c is NonNullable<typeof c> => c !== null);
+
+    if (criteria.length === 0) {
+      warnings.push('No valid criteria could be extracted from the file');
+    }
+
+    return { criteria, warnings };
+  } catch (error) {
+    console.error('Failed to parse file:', error);
+    return {
+      criteria: [],
+      warnings: [`Failed to parse file: ${error instanceof Error ? error.message : 'Unknown error'}`],
     };
   }
 }

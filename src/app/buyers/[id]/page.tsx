@@ -32,6 +32,8 @@ import { FormattedNumberInput } from "@/components/FormattedNumberInput";
 import { KeywordChipsInput } from "@/components/KeywordChipsInput";
 import { TimeRangeDialog, TimeRangeSelection } from "@/components/TimeRangeDialog";
 import { QuickCreateMode } from "@/components/QuickCreateMode";
+import { FileUploadMode } from "@/components/FileUploadMode";
+import { NamedParsedCriteria } from "@/lib/criteria/parseText";
 
 // Import placeholder documentation from the prompt template module
 import { PLACEHOLDER_DOCS, DEFAULT_SYSTEM_PROMPT } from '@/lib/gemini/promptTemplate';
@@ -94,6 +96,9 @@ export default function BuyerDetailPage() {
   const [showCriteriaForm, setShowCriteriaForm] = useState(false);
   const [editingCriteriaId, setEditingCriteriaId] = useState<string | null>(null);
   const [quickCreateMode, setQuickCreateMode] = useState(false);
+  const [fileUploadMode, setFileUploadMode] = useState(false);
+  const [expandedCriteriaMatches, setExpandedCriteriaMatches] = useState<string | null>(null);
+  const [criteriaMatches, setCriteriaMatches] = useState<Record<string, Match[]>>({});
   const [isSaving, setIsSaving] = useState(false);
   const [selectedLocations, setSelectedLocations] = useState<SelectedLocation[]>([]);
   const [criteriaForm, setCriteriaForm] = useState({
@@ -642,6 +647,92 @@ export default function BuyerDetailPage() {
     }));
     setSelectedLocations(locations);
     setQuickCreateMode(false);
+  };
+
+  // Handle File Upload - create multiple criteria
+  const handleFileUploadCreate = async (parsedCriteria: NamedParsedCriteria[]) => {
+    if (!supabase) return;
+
+    for (const parsed of parsedCriteria) {
+      // Resolve location names to PSL codes (simplified - just use names as communities)
+      const locationData = parsed.location_names.map((name) => ({
+        name,
+        pslCode: "", // Will need to be resolved via location search
+        address: name,
+      }));
+
+      const criteriaData = {
+        buyer_id: buyerId,
+        search_name: parsed.name,
+        transaction_type: parsed.transaction_type,
+        kind: "listing",
+        property_types: parsed.property_types.length > 0 ? parsed.property_types : null,
+        communities: parsed.location_names.length > 0 ? parsed.location_names : null,
+        psl_codes: null, // Would need location resolution
+        location_data: locationData.length > 0 ? locationData : null,
+        bedrooms: parsed.bedrooms.length > 0 ? parsed.bedrooms : null,
+        bathrooms: parsed.bathrooms.length > 0 ? parsed.bathrooms : null,
+        min_price_aed: parsed.min_price_aed,
+        max_price_aed: parsed.max_price_aed,
+        min_area_sqft: parsed.min_area_sqft,
+        max_area_sqft: parsed.max_area_sqft,
+        furnishing: parsed.furnishing.length > 0 ? parsed.furnishing : null,
+        is_off_plan: parsed.is_off_plan,
+        is_distressed_deal: parsed.is_distressed_deal,
+        is_urgent: parsed.is_urgent,
+        is_direct: parsed.is_direct,
+        ai_prompt: parsed.ai_prompt || null,
+        is_active: true,
+      };
+
+      const { error } = await supabase.from("buyer_criteria").insert(criteriaData);
+
+      if (error) {
+        console.error("Error creating criteria:", error);
+        throw new Error(`Failed to create criteria "${parsed.name}": ${error.message}`);
+      }
+    }
+
+    // Refresh criteria list
+    await fetchBuyerData();
+    setFileUploadMode(false);
+    setShowCriteriaForm(false);
+  };
+
+  // Load matches for a specific criteria
+  const loadCriteriaMatches = async (criteriaId: string) => {
+    if (!supabase) return;
+
+    // Toggle: if already expanded, collapse
+    if (expandedCriteriaMatches === criteriaId) {
+      setExpandedCriteriaMatches(null);
+      return;
+    }
+
+    // Check if we already loaded matches for this criteria
+    if (criteriaMatches[criteriaId]) {
+      setExpandedCriteriaMatches(criteriaId);
+      return;
+    }
+
+    // Fetch matches for this criteria
+    const { data, error } = await supabase
+      .from("matches")
+      .select("*")
+      .eq("criteria_id", criteriaId)
+      .order("created_at", { ascending: false })
+      .limit(20);
+
+    if (error) {
+      console.error("Error loading criteria matches:", error);
+      return;
+    }
+
+    setCriteriaMatches((prev) => ({
+      ...prev,
+      [criteriaId]: data || [],
+    }));
+    setExpandedCriteriaMatches(criteriaId);
   };
 
   // Auto-generate search name from selected filters
@@ -1238,7 +1329,15 @@ export default function BuyerDetailPage() {
         <CardContent>
           {/* Add/Edit Criteria Form */}
           {showCriteriaForm && (
-            quickCreateMode && !editingCriteriaId ? (
+            fileUploadMode && !editingCriteriaId ? (
+              <FileUploadMode
+                onCreateCriteria={handleFileUploadCreate}
+                onCancel={() => {
+                  setFileUploadMode(false);
+                  setShowCriteriaForm(false);
+                }}
+              />
+            ) : quickCreateMode && !editingCriteriaId ? (
               <QuickCreateMode
                 onApply={handleQuickCreateApply}
                 onCancel={() => {
@@ -1257,18 +1356,31 @@ export default function BuyerDetailPage() {
                     {editingCriteriaId ? "Edit Search Criteria" : "Add New Search Criteria"}
                   </h3>
                   {!editingCriteriaId && (
-                    <div className="flex items-center gap-2 bg-purple-50 px-3 py-1 rounded-full">
-                      <Switch
-                        id="quick-create-toggle"
-                        checked={quickCreateMode}
-                        onCheckedChange={setQuickCreateMode}
-                      />
-                      <Label
-                        htmlFor="quick-create-toggle"
-                        className="text-sm text-purple-700 cursor-pointer"
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant={quickCreateMode ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => {
+                          setQuickCreateMode(true);
+                          setFileUploadMode(false);
+                        }}
+                        className={quickCreateMode ? "bg-purple-600 hover:bg-purple-700" : ""}
                       >
-                        ✨ Quick Create with AI
-                      </Label>
+                        ✨ Quick Create
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={fileUploadMode ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => {
+                          setFileUploadMode(true);
+                          setQuickCreateMode(false);
+                        }}
+                        className={fileUploadMode ? "bg-blue-600 hover:bg-blue-700" : ""}
+                      >
+                        📄 Import File
+                      </Button>
                     </div>
                   )}
                 </div>
@@ -1599,55 +1711,173 @@ export default function BuyerDetailPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {criteria.map((c) => (
-                  <TableRow key={c.id}>
-                    <TableCell className="font-medium">{c.name}</TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-1">
-                        {c.property_types?.map((t) => (
-                          <Badge key={t} variant="outline" className="text-xs capitalize">
-                            {t}
+                {criteria.map((c) => {
+                  const matchCount = c.matches?.[0]?.count || 0;
+                  const isExpanded = expandedCriteriaMatches === c.id;
+                  const matches = criteriaMatches[c.id] || [];
+
+                  return (
+                    <>
+                      <TableRow key={c.id} className={isExpanded ? "border-b-0" : ""}>
+                        <TableCell className="font-medium">{c.name}</TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap gap-1">
+                            {c.property_types?.map((t) => (
+                              <Badge key={t} variant="outline" className="text-xs capitalize">
+                                {t}
+                              </Badge>
+                            ))}
+                            {c.communities?.map((comm) => (
+                              <Badge key={comm} variant="secondary" className="text-xs">
+                                {comm}
+                              </Badge>
+                            ))}
+                            {c.bedrooms && c.bedrooms.length > 0 && (
+                              <Badge variant="outline" className="text-xs">
+                                {c.bedrooms.join(",")} BR
+                              </Badge>
+                            )}
+                            {(c.min_price_aed || c.max_price_aed) && (
+                              <Badge variant="outline" className="text-xs">
+                                {c.min_price_aed ? formatPrice(c.min_price_aed) : "Any"} -{" "}
+                                {c.max_price_aed ? formatPrice(c.max_price_aed) : "Any"}
+                              </Badge>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => loadCriteriaMatches(c.id)}
+                            className="hover:bg-blue-50"
+                            disabled={matchCount === 0}
+                          >
+                            <Badge
+                              variant={isExpanded ? "default" : "outline"}
+                              className={isExpanded ? "bg-blue-600" : ""}
+                            >
+                              {matchCount} {isExpanded ? "▲" : "▼"}
+                            </Badge>
+                          </Button>
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <Badge variant={c.is_active ? "default" : "secondary"}>
+                            {c.is_active ? "Active" : "Paused"}
                           </Badge>
-                        ))}
-                        {c.communities?.map((comm) => (
-                          <Badge key={comm} variant="secondary" className="text-xs">
-                            {comm}
-                          </Badge>
-                        ))}
-                        {c.bedrooms && c.bedrooms.length > 0 && (
-                          <Badge variant="outline" className="text-xs">
-                            {c.bedrooms.join(",")} BR
-                          </Badge>
-                        )}
-                        {(c.min_price_aed || c.max_price_aed) && (
-                          <Badge variant="outline" className="text-xs">
-                            {c.min_price_aed ? formatPrice(c.min_price_aed) : "Any"} -{" "}
-                            {c.max_price_aed ? formatPrice(c.max_price_aed) : "Any"}
-                          </Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-center">
-                      <Badge variant="outline">
-                        {c.matches?.[0]?.count || 0}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-center">
-                      <Badge variant={c.is_active ? "default" : "secondary"}>
-                        {c.is_active ? "Active" : "Paused"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleEditCriteria(c)}
-                      >
-                        Edit
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleEditCriteria(c)}
+                          >
+                            Edit
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                      {/* Expanded Matches Row */}
+                      {isExpanded && (
+                        <TableRow key={`${c.id}-matches`} className="bg-gray-50">
+                          <TableCell colSpan={5} className="p-0">
+                            <div className="p-4 space-y-2">
+                              {matches.length === 0 ? (
+                                <p className="text-gray-500 text-sm">Loading matches...</p>
+                              ) : (
+                                <>
+                                  <div className="text-sm font-medium text-gray-700 mb-2">
+                                    Recent matches for &quot;{c.name}&quot;:
+                                  </div>
+                                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                                    {matches.map((match) => {
+                                      const data = match.listing_data as {
+                                        data?: {
+                                          bedrooms?: number[];
+                                          property_type?: string[];
+                                          location_raw?: string;
+                                          price_aed?: number;
+                                          message_body_clean?: string;
+                                        };
+                                      };
+                                      const listingData = data?.data || {};
+                                      return (
+                                        <div
+                                          key={match.id}
+                                          className="bg-white p-3 rounded border text-sm"
+                                        >
+                                          <div className="flex justify-between items-start">
+                                            <div className="flex-1">
+                                              <div className="flex gap-2 mb-1">
+                                                {listingData.property_type && (
+                                                  <Badge variant="outline" className="text-xs capitalize">
+                                                    {Array.isArray(listingData.property_type)
+                                                      ? listingData.property_type[0]
+                                                      : listingData.property_type}
+                                                  </Badge>
+                                                )}
+                                                {listingData.bedrooms && (
+                                                  <Badge variant="outline" className="text-xs">
+                                                    {Array.isArray(listingData.bedrooms)
+                                                      ? listingData.bedrooms[0]
+                                                      : listingData.bedrooms}{" "}
+                                                    BR
+                                                  </Badge>
+                                                )}
+                                                {listingData.price_aed && (
+                                                  <Badge variant="secondary" className="text-xs">
+                                                    {formatPrice(listingData.price_aed)}
+                                                  </Badge>
+                                                )}
+                                              </div>
+                                              <p className="text-gray-600 text-xs">
+                                                {listingData.location_raw || "Location N/A"}
+                                              </p>
+                                              {listingData.message_body_clean && (
+                                                <p className="text-gray-500 text-xs mt-1 line-clamp-2">
+                                                  {listingData.message_body_clean.substring(0, 150)}...
+                                                </p>
+                                              )}
+                                            </div>
+                                            <div className="text-right ml-4">
+                                              <Badge
+                                                className={
+                                                  (match.relevance_score || 0) >= 80
+                                                    ? "bg-green-600"
+                                                    : (match.relevance_score || 0) >= 60
+                                                    ? "bg-yellow-600"
+                                                    : "bg-gray-400"
+                                                }
+                                              >
+                                                {match.relevance_score || 0}%
+                                              </Badge>
+                                              <p className="text-xs text-gray-400 mt-1">
+                                                {new Date(match.created_at).toLocaleDateString()}
+                                              </p>
+                                            </div>
+                                          </div>
+                                          {match.qualification_notes && (
+                                            <p className="text-xs text-blue-700 mt-2 bg-blue-50 p-2 rounded">
+                                              {match.qualification_notes}
+                                            </p>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                  {matchCount > matches.length && (
+                                    <p className="text-xs text-gray-500 text-center mt-2">
+                                      Showing {matches.length} of {matchCount} matches
+                                    </p>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </>
+                  );
+                })}
               </TableBody>
             </Table>
           )}
