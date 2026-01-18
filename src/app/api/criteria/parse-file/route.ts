@@ -10,6 +10,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { parseFileToCriteria } from '@/lib/criteria/parseText';
 
+// Vercel function configuration - extend timeout for AI processing
+export const maxDuration = 60; // 60 seconds timeout
+
 // Supported MIME types
 const SUPPORTED_MIME_TYPES = [
   'application/pdf',
@@ -23,6 +26,15 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
   try {
+    // Check for API key first
+    if (!process.env.GEMINI_API_KEY) {
+      console.error('GEMINI_API_KEY not configured');
+      return NextResponse.json(
+        { error: 'AI service not configured. Please add GEMINI_API_KEY to environment variables.' },
+        { status: 503 }
+      );
+    }
+
     const formData = await request.formData();
     const file = formData.get('file') as File | null;
     const additionalContext = formData.get('context') as string | null;

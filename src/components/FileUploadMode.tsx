@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
 import { NamedParsedCriteria } from "@/lib/criteria/parseText";
 
 interface FileUploadModeProps {
@@ -18,6 +19,7 @@ interface ParsedCriteriaItem {
   parsed: NamedParsedCriteria;
   confidence: number;
   selected: boolean;
+  isEditing: boolean;
 }
 
 interface ParseFileResult {
@@ -106,11 +108,12 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
         return;
       }
 
-      // Initialize all criteria as selected
+      // Initialize all criteria as selected, not editing
       setParsedCriteria(
         result.criteria.map((c) => ({
           ...c,
           selected: true,
+          isEditing: false,
         }))
       );
     } catch (err) {
@@ -123,6 +126,22 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
   const handleToggleCriteria = (index: number) => {
     setParsedCriteria((prev) =>
       prev.map((c, i) => (i === index ? { ...c, selected: !c.selected } : c))
+    );
+  };
+
+  const handleToggleEdit = (index: number) => {
+    setParsedCriteria((prev) =>
+      prev.map((c, i) => (i === index ? { ...c, isEditing: !c.isEditing } : c))
+    );
+  };
+
+  const handleUpdateCriteria = (index: number, updates: Partial<NamedParsedCriteria>) => {
+    setParsedCriteria((prev) =>
+      prev.map((c, i) =>
+        i === index
+          ? { ...c, parsed: { ...c.parsed, ...updates } }
+          : c
+      )
     );
   };
 
@@ -151,6 +170,30 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
       return `${(price / 1000000).toFixed(price % 1000000 === 0 ? 0 : 1)}M AED`;
     }
     return `${price.toLocaleString()} AED`;
+  };
+
+  const parsePrice = (value: string): number | null => {
+    if (!value.trim()) return null;
+    const cleaned = value.toUpperCase().replace(/[,\s]/g, "");
+    const mMatch = cleaned.match(/^([\d.]+)M$/);
+    if (mMatch) return Math.round(parseFloat(mMatch[1]) * 1000000);
+    const kMatch = cleaned.match(/^([\d.]+)K$/);
+    if (kMatch) return Math.round(parseFloat(kMatch[1]) * 1000);
+    const num = parseFloat(cleaned);
+    return isNaN(num) ? null : Math.round(num);
+  };
+
+  const formatPriceInput = (price: number | null): string => {
+    if (!price) return "";
+    if (price >= 1000000) {
+      const m = price / 1000000;
+      return m === Math.floor(m) ? `${m}M` : `${m.toFixed(1)}M`;
+    }
+    if (price >= 1000) {
+      const k = price / 1000;
+      return k === Math.floor(k) ? `${k}K` : price.toLocaleString();
+    }
+    return price.toString();
   };
 
   return (
@@ -275,7 +318,7 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
       {/* Warnings */}
       {warnings.length > 0 && (
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm text-yellow-800">
-          <p className="font-medium mb-1">⚠️ Warnings:</p>
+          <p className="font-medium mb-1">Warnings:</p>
           <ul className="list-disc ml-4">
             {warnings.map((w, i) => (
               <li key={i}>{w}</li>
@@ -288,10 +331,15 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
       {parsedCriteria.length > 0 && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h4 className="font-semibold text-blue-900">
-              Found {parsedCriteria.length} Search{" "}
-              {parsedCriteria.length === 1 ? "Criteria" : "Criteria"}
-            </h4>
+            <div>
+              <h4 className="font-semibold text-blue-900">
+                Found {parsedCriteria.length} Search{" "}
+                {parsedCriteria.length === 1 ? "Criteria" : "Criteria"}
+              </h4>
+              <p className="text-sm text-gray-600">
+                Review and edit before saving. Click &quot;Edit&quot; to modify any criteria.
+              </p>
+            </div>
             <Badge variant="secondary">
               {selectedCount} selected
             </Badge>
@@ -309,88 +357,257 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
                 }`}
               >
                 <CardContent className="pt-4">
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      <Switch
-                        checked={item.selected}
-                        onCheckedChange={() => handleToggleCriteria(index)}
-                      />
-                      <div>
-                        <h5 className="font-semibold text-gray-900">
-                          {item.parsed.name}
-                        </h5>
-                        <div className="flex items-center gap-2 mt-1">
-                          <Badge variant="outline" className="text-xs capitalize">
-                            {item.parsed.transaction_type}
-                          </Badge>
-                          <Badge
-                            variant={
-                              item.confidence >= 80
-                                ? "default"
-                                : item.confidence >= 50
-                                ? "secondary"
-                                : "destructive"
+                  {item.isEditing ? (
+                    /* Edit Mode */
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <h5 className="font-semibold text-gray-700">Editing Criteria</h5>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleToggleEdit(index)}
+                        >
+                          Done Editing
+                        </Button>
+                      </div>
+
+                      {/* Name */}
+                      <div className="space-y-1">
+                        <Label className="text-xs text-gray-500">Name</Label>
+                        <Input
+                          value={item.parsed.name}
+                          onChange={(e) =>
+                            handleUpdateCriteria(index, { name: e.target.value })
+                          }
+                          placeholder="Search criteria name"
+                          className="h-9"
+                        />
+                      </div>
+
+                      {/* Transaction Type */}
+                      <div className="space-y-1">
+                        <Label className="text-xs text-gray-500">Transaction Type</Label>
+                        <div className="flex gap-2">
+                          <Button
+                            type="button"
+                            variant={item.parsed.transaction_type === "sale" ? "default" : "outline"}
+                            size="sm"
+                            onClick={() =>
+                              handleUpdateCriteria(index, { transaction_type: "sale" })
                             }
-                            className={`text-xs ${
-                              item.confidence >= 80
-                                ? "bg-green-600"
-                                : item.confidence >= 50
-                                ? "bg-yellow-600"
-                                : ""
-                            }`}
                           >
-                            {item.confidence}% confidence
-                          </Badge>
+                            Sale
+                          </Button>
+                          <Button
+                            type="button"
+                            variant={item.parsed.transaction_type === "rent" ? "default" : "outline"}
+                            size="sm"
+                            onClick={() =>
+                              handleUpdateCriteria(index, { transaction_type: "rent" })
+                            }
+                          >
+                            Rent
+                          </Button>
                         </div>
                       </div>
-                    </div>
-                  </div>
 
-                  {/* Criteria Details Grid */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
-                    {item.parsed.property_types.length > 0 && (
-                      <div>
-                        <span className="text-gray-500">Type:</span>{" "}
-                        <span className="capitalize">
-                          {item.parsed.property_types.join(", ")}
-                        </span>
+                      {/* Price Range */}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <Label className="text-xs text-gray-500">Min Price (AED)</Label>
+                          <Input
+                            defaultValue={formatPriceInput(item.parsed.min_price_aed)}
+                            onChange={(e) =>
+                              handleUpdateCriteria(index, {
+                                min_price_aed: parsePrice(e.target.value),
+                              })
+                            }
+                            placeholder="e.g., 500K, 2M"
+                            className="h-9"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs text-gray-500">Max Price (AED)</Label>
+                          <Input
+                            defaultValue={formatPriceInput(item.parsed.max_price_aed)}
+                            onChange={(e) =>
+                              handleUpdateCriteria(index, {
+                                max_price_aed: parsePrice(e.target.value),
+                              })
+                            }
+                            placeholder="e.g., 3M, 5M"
+                            className="h-9"
+                          />
+                        </div>
                       </div>
-                    )}
-                    {item.parsed.bedrooms.length > 0 && (
-                      <div>
-                        <span className="text-gray-500">Beds:</span>{" "}
-                        {item.parsed.bedrooms
-                          .map((b) => (b === 0 ? "Studio" : `${b}BR`))
-                          .join(", ")}
+
+                      {/* Bedrooms */}
+                      <div className="space-y-1">
+                        <Label className="text-xs text-gray-500">Bedrooms</Label>
+                        <Input
+                          value={item.parsed.bedrooms
+                            .map((b) => (b === 0 ? "Studio" : `${b}`))
+                            .join(", ")}
+                          onChange={(e) => {
+                            const parts = e.target.value.split(",").map((s) => s.trim());
+                            const bedrooms = parts
+                              .map((p) => {
+                                if (p.toLowerCase() === "studio") return 0;
+                                const num = parseInt(p);
+                                return isNaN(num) ? null : num;
+                              })
+                              .filter((n): n is number => n !== null);
+                            handleUpdateCriteria(index, { bedrooms });
+                          }}
+                          placeholder="e.g., Studio, 1, 2, 3"
+                          className="h-9"
+                        />
                       </div>
-                    )}
-                    {(item.parsed.min_price_aed || item.parsed.max_price_aed) && (
-                      <div>
-                        <span className="text-gray-500">Price:</span>{" "}
-                        {formatPrice(item.parsed.min_price_aed)} –{" "}
-                        {formatPrice(item.parsed.max_price_aed)}
+
+                      {/* Locations */}
+                      <div className="space-y-1">
+                        <Label className="text-xs text-gray-500">Locations</Label>
+                        <Input
+                          value={item.parsed.location_names.join(", ")}
+                          onChange={(e) => {
+                            const locations = e.target.value
+                              .split(",")
+                              .map((s) => s.trim())
+                              .filter((s) => s.length > 0);
+                            handleUpdateCriteria(index, { location_names: locations });
+                          }}
+                          placeholder="e.g., Dubai Marina, JBR, Downtown"
+                          className="h-9"
+                        />
                       </div>
-                    )}
-                    {item.parsed.location_names.length > 0 && (
-                      <div>
-                        <span className="text-gray-500">Location:</span>{" "}
-                        {item.parsed.location_names.slice(0, 2).join(", ")}
-                        {item.parsed.location_names.length > 2 && (
-                          <span className="text-gray-400">
-                            {" "}
-                            +{item.parsed.location_names.length - 2}
-                          </span>
+
+                      {/* Property Types */}
+                      <div className="space-y-1">
+                        <Label className="text-xs text-gray-500">Property Types</Label>
+                        <Input
+                          value={item.parsed.property_types.join(", ")}
+                          onChange={(e) => {
+                            const types = e.target.value
+                              .split(",")
+                              .map((s) => s.trim().toLowerCase())
+                              .filter((s) => s.length > 0);
+                            handleUpdateCriteria(index, { property_types: types });
+                          }}
+                          placeholder="e.g., apartment, villa, townhouse"
+                          className="h-9"
+                        />
+                      </div>
+
+                      {/* AI Prompt */}
+                      <div className="space-y-1">
+                        <Label className="text-xs text-gray-500">
+                          AI Qualifier (additional requirements)
+                        </Label>
+                        <Textarea
+                          value={item.parsed.ai_prompt}
+                          onChange={(e) =>
+                            handleUpdateCriteria(index, { ai_prompt: e.target.value })
+                          }
+                          placeholder="e.g., sea view, high floor, upgraded kitchen"
+                          rows={2}
+                          className="resize-none"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    /* View Mode */
+                    <>
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex items-center gap-3">
+                          <Switch
+                            checked={item.selected}
+                            onCheckedChange={() => handleToggleCriteria(index)}
+                          />
+                          <div>
+                            <h5 className="font-semibold text-gray-900">
+                              {item.parsed.name}
+                            </h5>
+                            <div className="flex items-center gap-2 mt-1">
+                              <Badge variant="outline" className="text-xs capitalize">
+                                {item.parsed.transaction_type}
+                              </Badge>
+                              <Badge
+                                variant={
+                                  item.confidence >= 80
+                                    ? "default"
+                                    : item.confidence >= 50
+                                    ? "secondary"
+                                    : "destructive"
+                                }
+                                className={`text-xs ${
+                                  item.confidence >= 80
+                                    ? "bg-green-600"
+                                    : item.confidence >= 50
+                                    ? "bg-yellow-600"
+                                    : ""
+                                }`}
+                              >
+                                {item.confidence}% confidence
+                              </Badge>
+                            </div>
+                          </div>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleToggleEdit(index)}
+                        >
+                          Edit
+                        </Button>
+                      </div>
+
+                      {/* Criteria Details Grid */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+                        {item.parsed.property_types.length > 0 && (
+                          <div>
+                            <span className="text-gray-500">Type:</span>{" "}
+                            <span className="capitalize">
+                              {item.parsed.property_types.join(", ")}
+                            </span>
+                          </div>
+                        )}
+                        {item.parsed.bedrooms.length > 0 && (
+                          <div>
+                            <span className="text-gray-500">Beds:</span>{" "}
+                            {item.parsed.bedrooms
+                              .map((b) => (b === 0 ? "Studio" : `${b}BR`))
+                              .join(", ")}
+                          </div>
+                        )}
+                        {(item.parsed.min_price_aed || item.parsed.max_price_aed) && (
+                          <div>
+                            <span className="text-gray-500">Price:</span>{" "}
+                            {formatPrice(item.parsed.min_price_aed)} –{" "}
+                            {formatPrice(item.parsed.max_price_aed)}
+                          </div>
+                        )}
+                        {item.parsed.location_names.length > 0 && (
+                          <div>
+                            <span className="text-gray-500">Location:</span>{" "}
+                            {item.parsed.location_names.slice(0, 2).join(", ")}
+                            {item.parsed.location_names.length > 2 && (
+                              <span className="text-gray-400">
+                                {" "}
+                                +{item.parsed.location_names.length - 2}
+                              </span>
+                            )}
+                          </div>
                         )}
                       </div>
-                    )}
-                  </div>
 
-                  {/* AI Prompt */}
-                  {item.parsed.ai_prompt && (
-                    <div className="mt-2 p-2 bg-blue-50 rounded text-sm text-blue-800">
-                      <span className="font-medium">AI Qualifier:</span>{" "}
-                      {item.parsed.ai_prompt}
-                    </div>
+                      {/* AI Prompt */}
+                      {item.parsed.ai_prompt && (
+                        <div className="mt-2 p-2 bg-blue-50 rounded text-sm text-blue-800">
+                          <span className="font-medium">AI Qualifier:</span>{" "}
+                          {item.parsed.ai_prompt}
+                        </div>
+                      )}
+                    </>
                   )}
                 </CardContent>
               </Card>
