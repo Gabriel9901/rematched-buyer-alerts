@@ -17,6 +17,7 @@ interface ContactInfo {
   username: string | null;
   source: string | null;
   whatsappLink: string | null;
+  telegramLink: string | null;
 }
 
 export async function GET(request: NextRequest) {
@@ -61,6 +62,7 @@ export async function GET(request: NextRequest) {
       username: data.agentUsername || null,
       source: data.source || null,
       whatsappLink: data.agentPhone ? `https://wa.me/${data.agentPhone}` : null,
+      telegramLink: data.agentUsername ? `https://t.me/${data.agentUsername.replace(/^@/, '')}` : null,
     };
 
     return NextResponse.json(contactInfo);
@@ -122,6 +124,7 @@ export async function POST(request: NextRequest) {
               username: data.agentUsername || null,
               source: data.source || null,
               whatsappLink: data.agentPhone ? `https://wa.me/${data.agentPhone}` : null,
+              telegramLink: data.agentUsername ? `https://t.me/${data.agentUsername.replace(/^@/, '')}` : null,
             };
           }
         } catch {
@@ -130,6 +133,7 @@ export async function POST(request: NextRequest) {
             username: null,
             source: null,
             whatsappLink: null,
+            telegramLink: null,
           };
         }
       })
