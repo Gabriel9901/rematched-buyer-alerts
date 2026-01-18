@@ -81,6 +81,52 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
     setIsDragging(false);
   }, []);
 
+  // Auto-resolve location names to PSL codes by querying the locations API
+  const resolveLocationName = async (locationName: string): Promise<ResolvedLocation | null> => {
+    if (!locationName || locationName.length < 2) return null;
+
+    try {
+      const response = await fetch(`/api/locations?q=${encodeURIComponent(locationName)}`);
+      if (!response.ok) return null;
+
+      const data = await response.json();
+      const locations = data.locations || [];
+
+      if (locations.length === 0) return null;
+
+      // Return the first (best) match
+      return {
+        name: locations[0].name,
+        pslCode: locations[0].pslCode,
+        address: locations[0].address || locations[0].name,
+      };
+    } catch {
+      console.warn(`Failed to resolve location: ${locationName}`);
+      return null;
+    }
+  };
+
+  // Resolve all location names for a criteria item
+  const resolveAllLocations = async (locationNames: string[]): Promise<ResolvedLocation[]> => {
+    const resolvedLocations: ResolvedLocation[] = [];
+
+    for (const name of locationNames) {
+      const resolved = await resolveLocationName(name);
+      if (resolved) {
+        resolvedLocations.push(resolved);
+      } else {
+        // Keep the original name but mark as unresolved (empty pslCode)
+        resolvedLocations.push({
+          name,
+          pslCode: "",
+          address: name,
+        });
+      }
+    }
+
+    return resolvedLocations;
+  };
+
   const handleParse = async () => {
     if (!file) return;
 
@@ -124,20 +170,20 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
         return;
       }
 
-      // Initialize all criteria as selected, not editing, with empty resolved locations
-      setParsedCriteria(
-        result.criteria.map((c) => ({
-          ...c,
-          selected: true,
-          isEditing: false,
-          // Initialize resolved locations from parsed location_names (without PSL codes yet)
-          resolvedLocations: c.parsed.location_names.map((name) => ({
-            name,
-            pslCode: "", // Will be resolved when user uses LocationSearch
-            address: name,
-          })),
-        }))
+      // Auto-resolve location names to PSL codes for all criteria
+      const criteriaWithResolvedLocations = await Promise.all(
+        result.criteria.map(async (c) => {
+          const resolvedLocations = await resolveAllLocations(c.parsed.location_names);
+          return {
+            ...c,
+            selected: true,
+            isEditing: false,
+            resolvedLocations,
+          };
+        })
       );
+
+      setParsedCriteria(criteriaWithResolvedLocations);
     } catch (err) {
       clearTimeout(timeoutId);
 

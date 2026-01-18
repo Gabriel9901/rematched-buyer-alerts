@@ -7,8 +7,28 @@
 
 import { callGeminiJson, callGeminiMultimodalJson } from '@/lib/gemini/client';
 
-// Valid values for enum fields
-const VALID_PROPERTY_TYPES = ['apartment', 'villa', 'townhouse', 'office', 'land', 'retail', 'other'];
+// Valid values for enum fields - includes Dubai-specific property types
+const VALID_PROPERTY_TYPES = [
+  'apartment',
+  'villa',
+  'townhouse',
+  'penthouse',
+  'duplex',
+  'office',
+  'land',
+  'retail',
+  'shop',
+  'showroom',
+  'warehouse',
+  'labor_camp',      // Staff/worker accommodation
+  'staff_accommodation',
+  'full_floor',
+  'half_floor',
+  'bulk_unit',
+  'building',
+  'hotel_apartment',
+  'other',
+];
 const VALID_FURNISHING = ['furnished', 'unfurnished', 'semi-furnished'];
 
 /**
@@ -68,7 +88,7 @@ INPUT TEXT:
 OUTPUT: Valid JSON matching this exact schema:
 {
   "transaction_type": "sale" or "rent" (default "sale" if not specified),
-  "property_types": ["apartment", "villa", "townhouse", "office", "land", "retail", "other"],
+  "property_types": ["apartment", "villa", "townhouse", "penthouse", "duplex", "office", "land", "retail", "shop", "showroom", "warehouse", "labor_camp", "staff_accommodation", "full_floor", "half_floor", "bulk_unit", "building", "hotel_apartment", "other"],
   "bedrooms": [array of integers, 0=studio],
   "bathrooms": [array of integers] or [],
   "min_price_aed": number or null,
@@ -342,9 +362,9 @@ IMPORTANT: A document may contain MULTIPLE different buyer requirements. Create 
 OUTPUT: Valid JSON array of criteria objects:
 [
   {
-    "name": "Short descriptive name (e.g., '2BR Marina Apartment', '3BR JVC Villa')",
+    "name": "Short descriptive name (e.g., '2BR Marina Apartment', 'Labor Camp in DIP')",
     "transaction_type": "sale" or "rent" (default "sale"),
-    "property_types": ["apartment", "villa", "townhouse", "office", "land", "retail", "other"],
+    "property_types": ["apartment", "villa", "townhouse", "penthouse", "duplex", "office", "land", "retail", "shop", "showroom", "warehouse", "labor_camp", "staff_accommodation", "full_floor", "half_floor", "bulk_unit", "building", "hotel_apartment", "other"],
     "bedrooms": [array of integers, 0=studio],
     "bathrooms": [array of integers] or [],
     "min_price_aed": number or null,
@@ -367,10 +387,11 @@ PARSING RULES:
 2. Area is typically in sqft. Convert sqm: 1 sqm = 10.764 sqft
 3. "Studio" = bedrooms: [0]
 4. "1-3BR" means bedrooms: [1, 2, 3]
-5. Generate a descriptive "name" for each criteria (e.g., "2BR Marina Sale", "3BR JVC Rent")
-6. Put qualitative requirements in ai_prompt: sea view, high floor, upgraded, corner unit, pool view, specific amenities, etc.
+5. Generate a descriptive "name" for each criteria (e.g., "2BR Marina Sale", "Labor Camp in DIP")
+6. Put qualitative requirements in ai_prompt: sea view, high floor, upgraded, corner unit, pool view, specific amenities, person capacity, etc.
 7. If you see "OR" conditions for different property types/locations, split into separate criteria
 8. Only set boolean filters if EXPLICITLY mentioned
+9. Property type mapping: "labor camp" or "labour camp" or "staff accommodation" or "worker accommodation" → property_types: ["labor_camp"]. "Warehouse" → ["warehouse"]. Use exact values from the allowed list.
 
 IMPORTANT: Output ONLY the JSON array, no other text.`;
 }
