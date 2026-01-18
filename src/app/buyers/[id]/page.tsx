@@ -31,6 +31,7 @@ import { LocationSearch } from "@/components/LocationSearch";
 import { FormattedNumberInput } from "@/components/FormattedNumberInput";
 import { KeywordChipsInput } from "@/components/KeywordChipsInput";
 import { TimeRangeDialog, TimeRangeSelection } from "@/components/TimeRangeDialog";
+import { QuickCreateMode } from "@/components/QuickCreateMode";
 
 // Import placeholder documentation from the prompt template module
 import { PLACEHOLDER_DOCS, DEFAULT_SYSTEM_PROMPT } from '@/lib/gemini/promptTemplate';
@@ -92,6 +93,7 @@ export default function BuyerDetailPage() {
 
   const [showCriteriaForm, setShowCriteriaForm] = useState(false);
   const [editingCriteriaId, setEditingCriteriaId] = useState<string | null>(null);
+  const [quickCreateMode, setQuickCreateMode] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [selectedLocations, setSelectedLocations] = useState<SelectedLocation[]>([]);
   const [criteriaForm, setCriteriaForm] = useState({
@@ -627,6 +629,19 @@ export default function BuyerDetailPage() {
     });
     setSelectedLocations([]);
     setEditingCriteriaId(null);
+  };
+
+  // Handle Quick Create apply - populate form with parsed data
+  const handleQuickCreateApply = (
+    parsed: Partial<typeof criteriaForm>,
+    locations: SelectedLocation[]
+  ) => {
+    setCriteriaForm((prev) => ({
+      ...prev,
+      ...parsed,
+    }));
+    setSelectedLocations(locations);
+    setQuickCreateMode(false);
   };
 
   // Auto-generate search name from selected filters
@@ -1223,14 +1238,40 @@ export default function BuyerDetailPage() {
         <CardContent>
           {/* Add/Edit Criteria Form */}
           {showCriteriaForm && (
+            quickCreateMode && !editingCriteriaId ? (
+              <QuickCreateMode
+                onApply={handleQuickCreateApply}
+                onCancel={() => {
+                  setQuickCreateMode(false);
+                  setShowCriteriaForm(false);
+                }}
+              />
+            ) : (
             <form
               onSubmit={handleSaveCriteria}
               className="border rounded-lg p-4 mb-6 bg-gray-50 space-y-4"
             >
               <div className="flex items-center justify-between">
-                <h3 className="font-semibold text-lg">
-                  {editingCriteriaId ? "Edit Search Criteria" : "Add New Search Criteria"}
-                </h3>
+                <div className="flex items-center gap-4">
+                  <h3 className="font-semibold text-lg">
+                    {editingCriteriaId ? "Edit Search Criteria" : "Add New Search Criteria"}
+                  </h3>
+                  {!editingCriteriaId && (
+                    <div className="flex items-center gap-2 bg-purple-50 px-3 py-1 rounded-full">
+                      <Switch
+                        id="quick-create-toggle"
+                        checked={quickCreateMode}
+                        onCheckedChange={setQuickCreateMode}
+                      />
+                      <Label
+                        htmlFor="quick-create-toggle"
+                        className="text-sm text-purple-700 cursor-pointer"
+                      >
+                        ✨ Quick Create with AI
+                      </Label>
+                    </div>
+                  )}
+                </div>
                 <div className="text-sm text-gray-600">
                   <span className="font-medium">Preview:</span>{" "}
                   <span className="text-blue-600">{generateSearchName()}</span>
@@ -1538,6 +1579,7 @@ export default function BuyerDetailPage() {
                 </Button>
               </div>
             </form>
+            )
           )}
 
           {/* Existing Criteria Table */}
