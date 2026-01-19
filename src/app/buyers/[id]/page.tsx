@@ -38,13 +38,26 @@ import { NamedParsedCriteria } from "@/lib/criteria/parseText";
 // Import placeholder documentation from the prompt template module
 import { PLACEHOLDER_DOCS, DEFAULT_SYSTEM_PROMPT } from '@/lib/gemini/promptTemplate';
 
+// Property types - synced with VALID_PROPERTY_TYPES in parseText.ts
 const PROPERTY_TYPES = [
   "apartment",
   "villa",
   "townhouse",
+  "penthouse",
+  "duplex",
   "office",
   "land",
   "retail",
+  "shop",
+  "showroom",
+  "warehouse",
+  "labor_camp",
+  "staff_accommodation",
+  "full_floor",
+  "half_floor",
+  "bulk_unit",
+  "building",
+  "hotel_apartment",
   "other",
 ];
 
@@ -700,10 +713,20 @@ export default function BuyerDetailPage() {
         min_area_sqft: parsed.min_area_sqft,
         max_area_sqft: parsed.max_area_sqft,
         furnishing: parsed.furnishing.length > 0 ? parsed.furnishing : null,
+        // Boolean filters
         is_off_plan: parsed.is_off_plan,
         is_distressed_deal: parsed.is_distressed_deal,
         is_urgent: parsed.is_urgent,
         is_direct: parsed.is_direct,
+        has_maid_bedroom: parsed.has_maid_bedroom,
+        is_agent_covered: parsed.is_agent_covered,
+        is_commission_split: parsed.is_commission_split,
+        is_mortgage_approved: parsed.is_mortgage_approved,
+        is_community_agnostic: parsed.is_community_agnostic,
+        // String array filters
+        mortgage_or_cash: parsed.mortgage_or_cash?.length > 0 ? parsed.mortgage_or_cash : null,
+        keywords: parsed.keywords?.length > 0 ? parsed.keywords.join(", ") : null,
+        // Other
         ai_prompt: parsed.ai_prompt || null,
         is_active: true,
       };

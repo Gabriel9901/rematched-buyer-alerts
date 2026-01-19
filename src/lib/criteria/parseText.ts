@@ -30,6 +30,7 @@ const VALID_PROPERTY_TYPES = [
   'other',
 ];
 const VALID_FURNISHING = ['furnished', 'unfurnished', 'semi-furnished'];
+const VALID_MORTGAGE_OR_CASH = ['mortgage', 'cash'];
 
 /**
  * Output schema from Gemini parsing
@@ -44,10 +45,20 @@ export interface ParsedCriteria {
   min_area_sqft: number | null;
   max_area_sqft: number | null;
   furnishing: string[];
+  // Boolean filters
   is_off_plan: boolean | null;
   is_distressed_deal: boolean | null;
   is_urgent: boolean | null;
   is_direct: boolean | null;
+  has_maid_bedroom: boolean | null;
+  is_agent_covered: boolean | null;
+  is_commission_split: boolean | null;
+  is_mortgage_approved: boolean | null;
+  is_community_agnostic: boolean | null;
+  // String array filters
+  mortgage_or_cash: string[];
+  keywords: string[];
+  // Other fields
   location_names: string[];
   ai_prompt: string;
 }
@@ -100,6 +111,13 @@ OUTPUT: Valid JSON matching this exact schema:
   "is_distressed_deal": true/false/null (below market deals),
   "is_urgent": true/false/null,
   "is_direct": true/false/null (direct from owner),
+  "has_maid_bedroom": true/false/null (if maid's room mentioned),
+  "is_agent_covered": true/false/null (if agent fee covered by seller),
+  "is_commission_split": true/false/null (if commission split mentioned),
+  "is_mortgage_approved": true/false/null (if buyer is mortgage pre-approved),
+  "is_community_agnostic": true/false/null (if buyer is flexible on location),
+  "mortgage_or_cash": ["mortgage", "cash"] or [] (payment method preference),
+  "keywords": ["keyword1", "keyword2"] or [] (specific searchable features),
   "location_names": ["Dubai Marina", "JBR", etc - extract area/community names],
   "ai_prompt": "Requirements that can't be mapped to fields above - things like 'sea view', 'high floor', 'upgraded kitchen', 'corner unit', etc.",
   "confidence": 0-100 (how confident you are in the parsing)
@@ -115,6 +133,14 @@ PARSING RULES:
 7. Put qualitative requirements in ai_prompt: sea view, high floor, upgraded, corner unit, pool view, etc.
 8. Only set boolean filters (is_off_plan, etc.) to true/false if EXPLICITLY mentioned, otherwise null
 9. If text is too vague or unparseable, put everything in ai_prompt and set confidence low
+10. "Maid's room", "maid bedroom", "helper's room" → has_maid_bedroom: true
+11. "Agent covered", "seller pays agent" → is_agent_covered: true
+12. "Commission split", "split commission" → is_commission_split: true
+13. "Mortgage approved", "pre-approved", "finance ready" → is_mortgage_approved: true
+14. "Flexible on location", "any area", "location flexible" → is_community_agnostic: true
+15. "Cash buyer", "cash only", "cash deal" → mortgage_or_cash: ["cash"]
+16. "Mortgage available", "can finance" → mortgage_or_cash: ["mortgage"]
+17. Extract specific searchable feature keywords into keywords array (e.g., "Burj view", "upgraded", "corner unit")
 
 IMPORTANT: Output ONLY the JSON object, no other text.`;
 }
@@ -139,10 +165,20 @@ export function validateAndNormalize(raw: unknown): { result: ParseResult; isVal
     min_area_sqft: null,
     max_area_sqft: null,
     furnishing: [],
+    // Boolean filters
     is_off_plan: null,
     is_distressed_deal: null,
     is_urgent: null,
     is_direct: null,
+    has_maid_bedroom: null,
+    is_agent_covered: null,
+    is_commission_split: null,
+    is_mortgage_approved: null,
+    is_community_agnostic: null,
+    // String array filters
+    mortgage_or_cash: [],
+    keywords: [],
+    // Other fields
     location_names: [],
     ai_prompt: '',
   };
@@ -212,6 +248,25 @@ export function validateAndNormalize(raw: unknown): { result: ParseResult; isVal
   parsed.is_distressed_deal = normalizeBoolean(data.is_distressed_deal);
   parsed.is_urgent = normalizeBoolean(data.is_urgent);
   parsed.is_direct = normalizeBoolean(data.is_direct);
+  parsed.has_maid_bedroom = normalizeBoolean(data.has_maid_bedroom);
+  parsed.is_agent_covered = normalizeBoolean(data.is_agent_covered);
+  parsed.is_commission_split = normalizeBoolean(data.is_commission_split);
+  parsed.is_mortgage_approved = normalizeBoolean(data.is_mortgage_approved);
+  parsed.is_community_agnostic = normalizeBoolean(data.is_community_agnostic);
+
+  // Mortgage or cash - filter to valid values
+  if (Array.isArray(data.mortgage_or_cash)) {
+    parsed.mortgage_or_cash = (data.mortgage_or_cash as string[])
+      .filter(v => VALID_MORTGAGE_OR_CASH.includes(v.toLowerCase()))
+      .map(v => v.toLowerCase());
+  }
+
+  // Keywords - keep as strings
+  if (Array.isArray(data.keywords)) {
+    parsed.keywords = (data.keywords as unknown[])
+      .filter(k => typeof k === 'string' && k.trim().length > 0)
+      .map(k => String(k).trim());
+  }
 
   // Location names - keep as strings
   if (Array.isArray(data.location_names)) {
@@ -334,6 +389,13 @@ export async function parseTextToCriteria(text: string): Promise<ParseResult> {
         is_distressed_deal: null,
         is_urgent: null,
         is_direct: null,
+        has_maid_bedroom: null,
+        is_agent_covered: null,
+        is_commission_split: null,
+        is_mortgage_approved: null,
+        is_community_agnostic: null,
+        mortgage_or_cash: [],
+        keywords: [],
         location_names: [],
         ai_prompt: text, // Put original text as ai_prompt fallback
       },
@@ -376,6 +438,13 @@ OUTPUT: Valid JSON array of criteria objects:
     "is_distressed_deal": true/false/null,
     "is_urgent": true/false/null,
     "is_direct": true/false/null,
+    "has_maid_bedroom": true/false/null (if maid's room mentioned),
+    "is_agent_covered": true/false/null (if agent fee covered by seller),
+    "is_commission_split": true/false/null (if commission split mentioned),
+    "is_mortgage_approved": true/false/null (if buyer is mortgage pre-approved),
+    "is_community_agnostic": true/false/null (if buyer is flexible on location),
+    "mortgage_or_cash": ["mortgage", "cash"] or [] (payment method preference),
+    "keywords": ["keyword1", "keyword2"] or [] (specific searchable features),
     "location_names": ["Dubai Marina", "JBR", etc],
     "ai_prompt": "Requirements that can't be mapped to structured fields",
     "confidence": 0-100
@@ -392,6 +461,14 @@ PARSING RULES:
 7. If you see "OR" conditions for different property types/locations, split into separate criteria
 8. Only set boolean filters if EXPLICITLY mentioned
 9. Property type mapping: "labor camp" or "labour camp" or "staff accommodation" or "worker accommodation" → property_types: ["labor_camp"]. "Warehouse" → ["warehouse"]. Use exact values from the allowed list.
+10. "Maid's room", "maid bedroom", "helper's room" → has_maid_bedroom: true
+11. "Agent covered", "seller pays agent" → is_agent_covered: true
+12. "Commission split", "split commission" → is_commission_split: true
+13. "Mortgage approved", "pre-approved", "finance ready" → is_mortgage_approved: true
+14. "Flexible on location", "any area", "location flexible" → is_community_agnostic: true
+15. "Cash buyer", "cash only", "cash deal" → mortgage_or_cash: ["cash"]
+16. "Mortgage available", "can finance" → mortgage_or_cash: ["mortgage"]
+17. Extract specific searchable feature keywords into keywords array (e.g., "Burj view", "upgraded", "corner unit")
 
 IMPORTANT: Output ONLY the JSON array, no other text.`;
 }

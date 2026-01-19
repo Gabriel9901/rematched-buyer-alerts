@@ -652,6 +652,116 @@ export function FileUploadMode({ onCreateCriteria, onCancel }: FileUploadModePro
                         />
                       </div>
 
+                      {/* Furnishing */}
+                      <div className="space-y-1">
+                        <Label className="text-xs text-gray-500">Furnishing</Label>
+                        <div className="flex flex-wrap gap-2">
+                          {["furnished", "unfurnished", "semi-furnished"].map((f) => (
+                            <Button
+                              key={f}
+                              type="button"
+                              variant={item.parsed.furnishing.includes(f) ? "default" : "outline"}
+                              size="sm"
+                              onClick={() => {
+                                const current = item.parsed.furnishing || [];
+                                const updated = current.includes(f)
+                                  ? current.filter((x) => x !== f)
+                                  : [...current, f];
+                                handleUpdateCriteria(index, { furnishing: updated });
+                              }}
+                            >
+                              {f.charAt(0).toUpperCase() + f.slice(1)}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Payment Method */}
+                      <div className="space-y-1">
+                        <Label className="text-xs text-gray-500">Payment Method</Label>
+                        <div className="flex gap-2">
+                          {["cash", "mortgage"].map((m) => (
+                            <Button
+                              key={m}
+                              type="button"
+                              variant={(item.parsed.mortgage_or_cash || []).includes(m) ? "default" : "outline"}
+                              size="sm"
+                              onClick={() => {
+                                const current = item.parsed.mortgage_or_cash || [];
+                                const updated = current.includes(m)
+                                  ? current.filter((x) => x !== m)
+                                  : [...current, m];
+                                handleUpdateCriteria(index, { mortgage_or_cash: updated });
+                              }}
+                            >
+                              {m.charAt(0).toUpperCase() + m.slice(1)}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Boolean Filters */}
+                      <div className="space-y-2">
+                        <Label className="text-xs text-gray-500">Property Filters (Yes / No / Any)</Label>
+                        <div className="grid grid-cols-2 gap-2">
+                          {[
+                            { key: "is_off_plan", label: "Off-Plan" },
+                            { key: "is_distressed_deal", label: "Below Market" },
+                            { key: "is_urgent", label: "Urgent" },
+                            { key: "is_direct", label: "Direct Owner" },
+                            { key: "has_maid_bedroom", label: "Maid's Room" },
+                            { key: "is_agent_covered", label: "Agent Covered" },
+                            { key: "is_commission_split", label: "Commission Split" },
+                            { key: "is_mortgage_approved", label: "Mortgage Approved" },
+                            { key: "is_community_agnostic", label: "Location Flexible" },
+                          ].map(({ key, label }) => {
+                            const value = item.parsed[key as keyof typeof item.parsed] as boolean | null;
+                            return (
+                              <div key={key} className="flex items-center gap-1">
+                                <span className="text-xs text-gray-600 w-28 truncate" title={label}>{label}</span>
+                                <div className="flex gap-0.5">
+                                  <Button
+                                    type="button"
+                                    variant={value === true ? "default" : "outline"}
+                                    size="sm"
+                                    className="h-6 px-2 text-xs"
+                                    onClick={() => handleUpdateCriteria(index, { [key]: value === true ? null : true })}
+                                  >
+                                    Y
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant={value === false ? "default" : "outline"}
+                                    size="sm"
+                                    className="h-6 px-2 text-xs"
+                                    onClick={() => handleUpdateCriteria(index, { [key]: value === false ? null : false })}
+                                  >
+                                    N
+                                  </Button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Keywords */}
+                      <div className="space-y-1">
+                        <Label className="text-xs text-gray-500">Keywords (comma-separated)</Label>
+                        <Input
+                          value={(item.parsed.keywords || []).join(", ")}
+                          onChange={(e) => {
+                            const keywords = e.target.value
+                              .split(",")
+                              .map((s) => s.trim())
+                              .filter((s) => s.length > 0);
+                            handleUpdateCriteria(index, { keywords });
+                          }}
+                          placeholder="e.g., Burj view, upgraded, corner unit"
+                          className="h-9"
+                        />
+                      </div>
+
                       {/* AI Prompt */}
                       <div className="space-y-1">
                         <Label className="text-xs text-gray-500">
