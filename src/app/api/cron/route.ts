@@ -82,7 +82,7 @@ function toTypesenseCriteria(dbCriteria: BuyerCriteria, useTemporalFilter: boole
 
     // Fallback: if no dateFrom is set, use sinceDaysAgo
     sinceDaysAgo: dateFrom ? undefined : DEFAULT_LOOKBACK_DAYS,
-    perPage: 50, // Results per criteria to qualify
+    perPage: 250, // Get all available results (TypeSense limit_hits is 1000)
   };
 }
 

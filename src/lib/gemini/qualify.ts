@@ -7,8 +7,8 @@
 import { callGeminiJson, callGeminiBatchJson } from './client';
 import { TypesenseHit } from '../typesense/types';
 
-// Default batch size for Gemini qualification (50 listings per API call)
-const DEFAULT_BATCH_SIZE = 50;
+// Default batch size for Gemini qualification (25 listings per API call)
+const DEFAULT_BATCH_SIZE = 25;
 
 export interface BuyerRequirements {
   name: string;

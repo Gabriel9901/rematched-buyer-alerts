@@ -20,8 +20,8 @@ import { DEFAULT_SYSTEM_PROMPT } from '@/lib/gemini/promptTemplate';
 // Gemini API URL
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent';
 
-// Default batch size for Gemini qualification
-const BATCH_SIZE = 50;
+// Default batch size for Gemini qualification (25 listings per API call)
+const BATCH_SIZE = 25;
 
 interface SearchResults {
   totalSearches: number;
@@ -92,7 +92,7 @@ function toTypesenseCriteria(dbCriteria: BuyerCriteria, useTemporalFilter: boole
     dateTo: dbCriteria.date_to ? Math.floor(new Date(dbCriteria.date_to).getTime() / 1000) : undefined,
     // Fallback: if no dateFrom is set, use sinceDaysAgo
     sinceDaysAgo: dateFrom ? undefined : DEFAULT_LOOKBACK_DAYS,
-    perPage: 100, // Increased from 25 to get more results
+    perPage: 250, // Get all available results (TypeSense limit_hits is 1000)
   };
 }
 
