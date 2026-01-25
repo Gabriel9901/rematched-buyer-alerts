@@ -14,6 +14,20 @@ const UNKNOWN_VALUE = 999999999;
 
 type Source = "whatsapp" | "telegram" | "app" | "xml" | null | undefined;
 
+// Subset of buyer criteria fields needed for generating dynamic questions
+export interface BuyerCriteriaForQuestions {
+  min_price_aed?: number | null;
+  max_price_aed?: number | null;
+  min_area_sqft?: number | null;
+  max_area_sqft?: number | null;
+  bedrooms?: number[] | null;
+  bathrooms?: number[] | null;
+  furnishing?: string[] | null;
+  is_off_plan?: boolean | null;
+  is_direct?: boolean | null;
+  is_agent_covered?: boolean | null;
+}
+
 // Listing data structure from Typesense/Supabase matches
 interface ListingData {
   id?: string;
@@ -36,6 +50,7 @@ interface ListingData {
     budget_max_aed_null?: boolean;
     is_off_plan?: boolean;
     is_distressed_deal?: boolean;
+    is_direct?: boolean;
     furnishing?: string;
     is_agent_covered?: boolean;
   };
@@ -250,6 +265,99 @@ function hasValidRawMessage(messageRaw: string | undefined): boolean {
 }
 
 /**
+ * Check if a value is missing/unknown (null, undefined, or sentinel values)
+ */
+function isMissingValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed === "" || trimmed === "~~" || trimmed === "null";
+  }
+  if (typeof value === "number") {
+    return value === 0 || value === 1 || value === UNKNOWN_VALUE;
+  }
+  if (Array.isArray(value)) {
+    return value.length === 0;
+  }
+  return false;
+}
+
+/**
+ * Generate dynamic questions for missing fields that the buyer cares about
+ *
+ * @param data - Listing data
+ * @param criteria - Buyer criteria (what they care about)
+ * @returns Array of question strings for missing fields
+ */
+function getMissingFieldQuestions(
+  data: ListingData["data"],
+  criteria: BuyerCriteriaForQuestions | null | undefined
+): string[] {
+  if (!criteria) return [];
+
+  const questions: string[] = [];
+
+  // Price: buyer specified price range but listing has no price
+  const buyerCaresAboutPrice = criteria.min_price_aed != null || criteria.max_price_aed != null;
+  const listingMissingPrice = isMissingValue(data?.price_aed);
+  if (buyerCaresAboutPrice && listingMissingPrice) {
+    questions.push("What's the asking price?");
+  }
+
+  // Area: buyer specified area range but listing has no area
+  const buyerCaresAboutArea = criteria.min_area_sqft != null || criteria.max_area_sqft != null;
+  const listingMissingArea = isMissingValue(data?.area_sqft);
+  if (buyerCaresAboutArea && listingMissingArea) {
+    questions.push("What's the area in sqft?");
+  }
+
+  // Bedrooms: buyer specified bedrooms but listing has no bedrooms
+  const buyerCaresAboutBedrooms = criteria.bedrooms && criteria.bedrooms.length > 0;
+  const listingMissingBedrooms = isMissingValue(data?.bedrooms);
+  if (buyerCaresAboutBedrooms && listingMissingBedrooms) {
+    questions.push("How many bedrooms?");
+  }
+
+  // Bathrooms: buyer specified bathrooms but listing has no bathrooms
+  const buyerCaresAboutBathrooms = criteria.bathrooms && criteria.bathrooms.length > 0;
+  const listingMissingBathrooms = isMissingValue(data?.bathrooms);
+  if (buyerCaresAboutBathrooms && listingMissingBathrooms) {
+    questions.push("How many bathrooms?");
+  }
+
+  // Furnishing: buyer specified furnishing but listing doesn't have it
+  const buyerCaresAboutFurnishing = criteria.furnishing && criteria.furnishing.length > 0;
+  const listingMissingFurnishing = isMissingValue(data?.furnishing);
+  if (buyerCaresAboutFurnishing && listingMissingFurnishing) {
+    questions.push("Is it furnished?");
+  }
+
+  // Off-plan: buyer specified off-plan preference but listing doesn't have it
+  const buyerCaresAboutOffPlan = criteria.is_off_plan != null;
+  const listingMissingOffPlan = data?.is_off_plan === undefined || data?.is_off_plan === null;
+  if (buyerCaresAboutOffPlan && listingMissingOffPlan) {
+    questions.push("Is it off-plan or ready?");
+  }
+
+  // Direct: buyer specified direct preference but listing doesn't have it
+  const buyerCaresAboutDirect = criteria.is_direct != null;
+  const listingMissingDirect = data?.is_direct === undefined || data?.is_direct === null;
+  if (buyerCaresAboutDirect && listingMissingDirect) {
+    questions.push("Is it a direct deal?");
+  }
+
+  // Agent covered: buyer specified agent covered preference but listing doesn't have it
+  const buyerCaresAboutAgentCovered = criteria.is_agent_covered != null;
+  const listingMissingAgentCovered = data?.is_agent_covered === undefined || data?.is_agent_covered === null;
+  if (buyerCaresAboutAgentCovered && listingMissingAgentCovered) {
+    questions.push("Is agent covered?");
+  }
+
+  // Limit to max 5 questions to avoid overwhelming
+  return questions.slice(0, 5);
+}
+
+/**
  * Get the follow-up line based on property type
  */
 function getFollowUpLine(propertyTypes: string | string[] | undefined): string {
@@ -267,12 +375,43 @@ function getFollowUpLine(propertyTypes: string | string[] | undefined): string {
 }
 
 /**
+ * Build the follow-up section with dynamic questions based on missing fields
+ */
+function buildFollowUpSection(
+  propertyTypes: string | string[] | undefined,
+  missingQuestions: string[]
+): string {
+  const types = Array.isArray(propertyTypes)
+    ? propertyTypes
+    : propertyTypes
+      ? [propertyTypes]
+      : [];
+  const isLand = types.some((t) => t.toLowerCase() === "land");
+
+  // If we have dynamic questions, format them nicely
+  if (missingQuestions.length > 0) {
+    const questionsList = missingQuestions.map((q) => `- ${q}`).join("\n");
+    if (isLand) {
+      return `Can you confirm it's direct & share more details if it's still available? In particular:\n${questionsList}`;
+    }
+    return `Can you share more details if it's still available? In particular:\n${questionsList}`;
+  }
+
+  // No missing questions - use simpler message
+  if (isLand) {
+    return "Can you confirm it's direct & share affection plan/location pin if it's still available?";
+  }
+  return "Is it still available?";
+}
+
+/**
  * Generate message for contacting about a LISTING
  * (User has a client request, found a listing that matches)
  */
 export function generateMessageForListing(
   listingData: ListingData,
-  source?: Source | string | null
+  source?: Source | string | null,
+  buyerCriteria?: BuyerCriteriaForQuestions | null
 ): string {
   const data = listingData.data;
   const sourceText = getSourceText(source || listingData.source);
@@ -282,13 +421,15 @@ export function generateMessageForListing(
     ? `"${stripEmojis(data!.message_body_raw!)}"`
     : buildListingLine(data);
 
-  const followUpLine = getFollowUpLine(data?.property_type);
+  // Get dynamic questions for missing fields the buyer cares about
+  const missingQuestions = getMissingFieldQuestions(data, buyerCriteria);
+  const followUpSection = buildFollowUpSection(data?.property_type, missingQuestions);
 
   return `Hey, found the listing you posted on ${sourceText}:
 
 - ${description}
 
-${followUpLine}
+${followUpSection}
 
 Found you through ReMatch: https://www.joinrematch.com/agent-ext`;
 }
@@ -323,7 +464,8 @@ Found you through ReMatch: https://www.joinrematch.com/agent-ext`;
  */
 export function generateContactMessage(
   listingData: ListingData,
-  source?: Source | string | null
+  source?: Source | string | null,
+  buyerCriteria?: BuyerCriteriaForQuestions | null
 ): string {
   const kind = listingData.data?.kind;
 
@@ -332,5 +474,5 @@ export function generateContactMessage(
   }
 
   // Default to listing message
-  return generateMessageForListing(listingData, source);
+  return generateMessageForListing(listingData, source, buyerCriteria);
 }
