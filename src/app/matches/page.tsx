@@ -40,6 +40,17 @@ interface MatchWithDetails {
   criteria: {
     id: string;
     name: string;
+    // Criteria fields for dynamic WhatsApp questions
+    min_price_aed?: number | null;
+    max_price_aed?: number | null;
+    min_area_sqft?: number | null;
+    max_area_sqft?: number | null;
+    bedrooms?: number[] | null;
+    bathrooms?: number[] | null;
+    furnishing?: string[] | null;
+    is_off_plan?: boolean | null;
+    is_direct?: boolean | null;
+    is_agent_covered?: boolean | null;
     buyer: {
       id: string;
       name: string;
@@ -139,6 +150,16 @@ export default function MatchesPage() {
             criteria:buyer_criteria(
               id,
               name,
+              min_price_aed,
+              max_price_aed,
+              min_area_sqft,
+              max_area_sqft,
+              bedrooms,
+              bathrooms,
+              furnishing,
+              is_off_plan,
+              is_direct,
+              is_agent_covered,
               buyer:buyers(id, name)
             )
           `)
@@ -756,8 +777,8 @@ export default function MatchesPage() {
                     <div className="flex items-center gap-2">
                       {contact ? (
                         (() => {
-                          // Generate contextual message for this listing
-                          const message = generateContactMessage(match.listing_data, contact.source);
+                          // Generate contextual message for this listing with dynamic questions
+                          const message = generateContactMessage(match.listing_data, contact.source, match.criteria);
                           const hasWhatsApp = !!contact.phone;
                           const hasTelegram = !!contact.username;
 
