@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "setup": "./scripts/conductor-setup.sh",
+    "run": "vercel --yes"
+  },
+  "runScriptMode": "nonconcurrent"
+}

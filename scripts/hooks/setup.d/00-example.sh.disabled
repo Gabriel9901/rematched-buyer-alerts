@@ -1,0 +1,21 @@
+# Example setup hook
+# Rename to 00-example.sh to enable
+#
+# Hooks run in alphabetical order during workspace setup.
+# Use numeric prefixes to control order: 00-first.sh, 50-middle.sh, 99-last.sh
+#
+# Available variables:
+#   CONDUCTOR_WORKSPACE_NAME
+#   CONDUCTOR_WORKSPACE_PATH
+#   CONDUCTOR_ROOT_PATH
+#   CONDUCTOR_PORT
+
+echo "  Example hook running..."
+
+# Example: Set up a specific database for this workspace
+# createdb "${CONDUCTOR_WORKSPACE_NAME}_dev" 2>/dev/null || true
+
+# Example: Copy additional config files
+# cp "$CONDUCTOR_ROOT_PATH/.some-config" .some-config
+
+echo "  Example hook complete"
